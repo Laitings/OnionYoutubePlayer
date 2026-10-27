@@ -101,5 +101,7 @@ Next
 If browser = "" Then
   sh.Run url, 1, False
 Else
-  sh.Run """" & browser & """ --app=" & url & WindowArgs(), 1, False
+  ' Its own browser profile (browser-profile folder): a separate process each time, which is the only way Edge and Chrome
+  ' obey the window size and position. An Edge that is already running ignores them for new windows.
+  sh.Run """" & browser & """ --app=" & url & " --user-data-dir=""" & dir & "\browser-profile"" --no-first-run --no-default-browser-check" & WindowArgs(), 1, False
 End If
