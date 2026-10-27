@@ -217,6 +217,10 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
 .card ol { margin: 0 0 16px; padding-left: 20px; display: grid; gap: 8px; }
 .card li::marker { color: var(--accent); font-family: var(--head); }
 .card code { background: var(--bg); padding: 1px 6px; border-radius: 5px; }
+.card .tip { margin: 12px 0 0; font-size: 13px; color: var(--dim); }
+.card .tip summary { cursor: pointer; color: var(--text); }
+.card .tip p { margin: 8px 0; }
+.card .tip ol { margin: 0 0 4px; font-size: 13px; }
 #setup-text { width: 100%; height: 150px; resize: vertical; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; font: 12px/1.4 Consolas, monospace; }
 #setup-text:focus { outline: none; border-color: var(--accent); }
 .actions { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
@@ -377,6 +381,16 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
     </ol>
     <textarea id="setup-text" placeholder="Paste the copied request here" aria-label="Copied request" spellcheck="false" required></textarea>
     <p style="margin:10px 0 0;font-size:13px">The private window matters: it stops YouTube from rotating the cookies this app reuses for playback.</p>
+    <details class="tip">
+      <summary>Songs won't play, or "Sign in to confirm you're not a bot"?</summary>
+      <p>Playback is more reliable with its own cookie file, which YouTube rotates much less:</p>
+      <ol>
+        <li>Open a new private window, sign in at <code>youtube.com</code>, then in that same window open <code>youtube.com/robots.txt</code>. Keep it the only tab.</li>
+        <li>With a cookies.txt extension (for example "Get cookies.txt LOCALLY"), export the cookies for youtube.com.</li>
+        <li>Close the private window right away.</li>
+        <li>Save the file as <code>cookies.txt</code> in the Onion folder (next to <code>app.py</code>) and restart the player. Playback then uses that file instead of the pasted headers. Redo it if playback fails again, and don't copy it to another computer.</li>
+      </ol>
+    </details>
     <div class="actions">
       <span id="setup-err" role="alert"></span>
       <button type="button" class="ghost" id="setup-cancel" hidden>Cancel</button>

@@ -34,7 +34,14 @@ Space play/pause, N next, P previous, S shuffle, R repeat, L like/unlike the pla
 
 ## If something breaks
 
-- **Songs won't play, or "Sign in to confirm" errors:** your login cookies have gone stale. Click "Update login" in the sidebar and paste fresh headers (use a private window and close it afterwards).
+- **Songs won't play, or "Sign in to confirm you're not a bot" / "not available in your country" errors:** the cookies used for playback have gone stale or been rejected. First click "Update login" in the sidebar and paste fresh headers (use a private window and close it afterwards). If that doesn't help, or it keeps coming back, give playback its own cookie file, which YouTube rotates much less:
+  1. Open a new private window and sign in at `youtube.com`.
+  2. In that same window, open `https://www.youtube.com/robots.txt`. Keep it the only tab.
+  3. With a cookies.txt extension (for example "Get cookies.txt LOCALLY"), export the cookies for youtube.com.
+  4. Close the private window straight away, so it can't rotate them.
+  5. Save the file as `cookies.txt` next to `app.py` and restart the player.
+
+  A `cookies.txt` there is used for playback instead of the pasted headers (your playlists and albums still use the headers), so "Update login" won't fix playback while it is stale: repeat the export instead. Use a separate export on each computer and never copy the file between them. It is in `.gitignore`. A region error on one specific song can also be a real region block.
 - **Nothing plays after YouTube changes something:** update yt-dlp with `.venv\Scripts\python -m pip install -U "yt-dlp[default]"` and restart. If the console mentions a missing JavaScript runtime or "Signature solving failed", install Deno with `winget install DenoLand.Deno`, then close the console window and start `run.bat` again so it sees the new install. Node.js works too if it's already installed and on your PATH.
 - **Unavailable songs** are greyed out and skipped. They're usually removed or region-blocked tracks that YouTube Music still lists.
 - **Port in use:** set the environment variable `ONION_PORT` to another number before starting.
