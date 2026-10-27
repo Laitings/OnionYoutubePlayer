@@ -147,6 +147,9 @@ def fetch_playlists() -> dict:
     yt = get_yt()
     with _yt_lock:
         items = yt.get_library_playlists(limit=None)
+    if not items and len((read_cache("_playlists") or {}).get("playlists") or []) > 1:
+        # a stale login gets an empty library back instead of an error: keep the saved list and ask for a new login
+        raise HTTPException(401, "YouTube Music returned no playlists. The saved login has probably expired. Paste fresh headers.")
     out = [{"id": "LM", "title": "Liked songs", "count": None}]
     seen = {"LM", "SE", "RDPN"}   # SE = "Episodes for later", RDPN = "New Episodes": podcasts, not music
     for p in items:
@@ -568,6 +571,9 @@ def favorite_albums(refresh: int = 0):
         raise
     except Exception as exc:
         raise api_error(exc, account_level=True)
+    if not items and (read_cache("_albums") or {}).get("albums"):
+        # a stale login gets an empty library back instead of an error: don't wipe the saved favorites
+        raise HTTPException(401, "YouTube Music returned no albums. The saved login has probably expired. Paste fresh headers.")
     out = []
     for it in items:
         bid = it.get("browseId")
