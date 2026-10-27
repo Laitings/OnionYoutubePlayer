@@ -502,34 +502,46 @@ def suggest(pid: str, refresh: int = 0):
         return {"songs": [t for t in hit[1] if t["id"] not in have], "cached": True}   # minus what was added since
     yt = get_yt()
     pool = [t for t in tracks if t.get("ok") and t.get("id")]
-    seeds = random.sample(pool, min(2, len(pool)))
-    sources: list[list[dict]] = []
+    seeds = random.sample(pool, min(4, len(pool)))
+    song_radios: list[list[dict]] = []   # radios of single songs from this playlist: they stay close to those songs
+    others: list[list[dict]] = []        # YouTube's own suggestions and the playlist radio: black boxes that may lean on your whole taste
     errors: list[str] = []
 
-    def attempt(label: str, fn):
+    def attempt(label: str, into: list, fn):
         try:
             with _yt_lock:
-                sources.append(fn())
+                into.append(fn())
         except HTTPException:
             raise
         except Exception as exc:
             errors.append(f"{label}: {exc.__class__.__name__}: {str(exc)[:160]}")
             print(f"suggest {label} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
 
+    for sd in seeds:
+        attempt("song radio", song_radios, lambda sd=sd: [simplify_watch(t) for t in yt.get_watch_playlist(videoId=sd["id"], radio=True, limit=25).get("tracks") or []])
     if pid != "LM":   # YouTube Music only offers its own suggestions on playlists you own
-        attempt("suggestions", lambda: [simplify(t) for t in yt.get_playlist(pid, limit=0, suggestions_limit=30).get("suggestions") or []])
-    attempt("playlist radio", lambda: [simplify_watch(t) for t in yt.get_watch_playlist(playlistId=pid, radio=True, limit=40).get("tracks") or []])
-    for s in seeds:
-        attempt("song radio", lambda s=s: [simplify_watch(t) for t in yt.get_watch_playlist(videoId=s["id"], radio=True, limit=25).get("tracks") or []])
+        attempt("suggestions", others, lambda: [simplify(t) for t in yt.get_playlist(pid, limit=0, suggestions_limit=30).get("suggestions") or []])
+    attempt("playlist radio", others, lambda: [simplify_watch(t) for t in yt.get_watch_playlist(playlistId=pid, radio=True, limit=40).get("tracks") or []])
 
-    songs, seen = [], set(have)
-    for rank in range(max((len(x) for x in sources), default=0)):   # take one from each source in turn, so they mix
-        for src in sources:
-            if rank < len(src):
-                t = src[rank]
-                if t["id"] and t["ok"] and t["id"] not in seen:
-                    seen.add(t["id"]); songs.append(t)
-    songs = songs[:40]
+    # A song that shows up in several radios (or in YouTube's own lists too) fits the playlist best, so those go first.
+    votes: dict[str, int] = {}
+    for src in song_radios + others:
+        for vid in {t["id"] for t in src if t["id"]}:
+            votes[vid] = votes.get(vid, 0) + 1
+
+    def mix(sources: list[list[dict]], seen: set) -> list[dict]:
+        out = []
+        for rank in range(max((len(x) for x in sources), default=0)):   # one from each source in turn
+            for src in sources:
+                if rank < len(src):
+                    t = src[rank]
+                    if t["id"] and t["ok"] and t["id"] not in seen:
+                        seen.add(t["id"]); out.append(t)
+        return out
+
+    seen = set(have)
+    songs = sorted(mix(song_radios, seen), key=lambda t: -votes.get(t["id"], 0))[:30]
+    songs += mix(others, seen)[: 40 - len(songs)]   # fill up with YouTube's own picks
     if not songs and errors:
         raise HTTPException(502, errors[0])
     _suggest_cache[pid] = (time.time(), songs)
