@@ -97,6 +97,15 @@ def get_yt() -> YTMusic:
     return _yt
 
 
+def artist_list(artists) -> list[dict]:
+    """[{name, id}] for the artists of a song. The id is what the artist page needs (some songs have none)."""
+    out = []
+    for x in artists or []:
+        if isinstance(x, dict) and x.get("name"):
+            out.append({"name": x["name"], "id": x.get("id")})
+    return out
+
+
 def simplify(t: dict) -> dict:
     thumbs = t.get("thumbnails") or []
     album = t.get("album") or {}
@@ -105,6 +114,7 @@ def simplify(t: dict) -> dict:
         "id": video_id,
         "title": t.get("title") or "",
         "artists": ", ".join(a["name"] for a in (t.get("artists") or []) if a.get("name")),
+        "artistList": artist_list(t.get("artists")),
         "album": album.get("name") or "",
         "albumId": album.get("id"),
         "duration": t.get("duration_seconds") or 0,
@@ -168,6 +178,7 @@ def fetch_album(bid: str) -> dict:
             "id": vid,
             "title": t.get("title") or "",
             "artists": names(t.get("artists")) or names(a.get("artists")),
+            "artistList": artist_list(t.get("artists")) or artist_list(a.get("artists")),
             "album": title,
             "albumId": bid,
             "duration": t.get("duration_seconds") or 0,
@@ -186,12 +197,75 @@ def fetch_album(bid: str) -> dict:
         "album": {
             "type": a.get("type") or "Album",       # Album, EP, Single
             "artists": artists,
+            "artistList": artist_list(a.get("artists")),
             "year": year,
             "cover": art,
             "seconds": seconds,
             "explicit": bool(a.get("isExplicit")),
             "description": (a.get("description") or "")[:1200],
             "playlistId": a.get("audioPlaylistId"),   # what YouTube Music needs to add the album to your library
+        },
+    }
+
+
+def is_artist(pid: str) -> bool:
+    return pid.startswith("UC") or pid.startswith("MPLA")
+
+
+def fetch_artist(cid: str) -> dict:
+    """An artist page: top songs, albums, singles and similar artists. Songs are shaped like a playlist's."""
+    yt = get_yt()
+    with _yt_lock:
+        a = yt.get_artist(cid)
+    now = int(time.time())
+
+    def thumb(x):
+        th = (x or {}).get("thumbnails") or []
+        return th[-1]["url"] if th else None
+
+    def releases(section: str) -> list[dict]:
+        sec = a.get(section) or {}
+        items = sec.get("results") or []
+        if sec.get("browseId") and sec.get("params"):   # the page only shows a few: ask for all of them
+            try:
+                with _yt_lock:
+                    items = yt.get_artist_albums(sec["browseId"], sec["params"], limit=None) or items
+            except Exception as exc:
+                print(f"artist {section} list failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+        return [{"id": i["browseId"], "title": i.get("title") or "", "year": str(i.get("year") or ""),
+                 "type": i.get("type") or ("Single" if section == "singles" else "Album"), "art": thumb(i)}
+                for i in items if i.get("browseId")]
+
+    name = a.get("name") or "Artist"
+    songs = a.get("songs") or {}
+    tracks = []
+    if songs.get("browseId"):   # the full song list is a playlist: take its first 50 (with durations)
+        try:
+            pl_id = songs["browseId"].removeprefix("VL")
+            with _yt_lock:
+                tracks = [simplify(t) for t in (yt.get_playlist(pl_id, limit=50).get("tracks") or [])]
+        except Exception as exc:
+            print(f"artist songs list failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+    if not tracks:
+        for t in songs.get("results") or []:
+            vid = t.get("videoId")
+            al = t.get("album")
+            tracks.append({
+                "id": vid, "title": t.get("title") or "", "artists": name, "artistList": [{"name": name, "id": cid}],
+                "album": (al.get("name") if isinstance(al, dict) else al) or "", "albumId": al.get("id") if isinstance(al, dict) else None,
+                "duration": t.get("duration_seconds") or 0, "art": thumb(t), "ok": bool(vid), "type": None, "sid": None,
+            })
+    stats = " · ".join(x for x in (
+        (a.get("subscribers") + " subscribers") if a.get("subscribers") else "",
+        (a.get("monthlyListeners") + " monthly listeners") if a.get("monthlyListeners") else "") if x)
+    return {
+        "id": cid, "title": name, "fetched": now, "checked": now, "count": len(tracks), "tracks": tracks,
+        "artist": {
+            "name": name, "stats": stats, "views": a.get("views") or "", "image": thumb(a),
+            "description": (a.get("description") or "")[:1500],
+            "albums": releases("albums"), "singles": releases("singles"),
+            "related": [{"id": r["browseId"], "title": r.get("title") or "", "subscribers": r.get("subscribers") or "", "art": thumb(r)}
+                        for r in (a.get("related") or {}).get("results") or [] if r.get("browseId")],
         },
     }
 
@@ -317,8 +391,10 @@ def playlist(pid: str, refresh: int = 0, full: int = 0):
         return {**cached, "cached": True}
     if cached and is_album(pid) and not full:
         return {**cached, "checked": int(time.time()), "cached": False}   # albums don't change
+    if cached and is_artist(pid) and not full and time.time() - cached.get("fetched", 0) < 7 * 24 * 3600:
+        return {**cached, "checked": int(time.time()), "cached": False}   # artist pages: look again after a week
     try:
-        data = fetch_album(pid) if is_album(pid) else fetch_playlist(pid, None if full else cached)
+        data = fetch_album(pid) if is_album(pid) else fetch_artist(pid) if is_artist(pid) else fetch_playlist(pid, None if full else cached)
     except HTTPException:
         raise
     except Exception as exc:
@@ -417,6 +493,31 @@ def favorite_album(body: FavBody):
     return {"ok": True, "favorite": body.favorite}
 
 
+_artist_lists: dict[str, list] = {}
+
+
+@app.get("/api/artists/{video_id}")
+def artists_of(video_id: str):
+    """The artists of a song with their page ids, for songs saved before the player remembered them."""
+    safe_id(video_id)
+    if video_id in _artist_lists:
+        return {"artists": _artist_lists[video_id]}
+    try:
+        with _yt_lock:
+            wp = get_yt().get_watch_playlist(videoId=video_id, limit=1)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"artist lookup failed ({video_id}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    first = (wp.get("tracks") or [{}])[0]
+    lst = [x for x in artist_list(first.get("artists")) if x.get("id")]
+    if not lst:
+        raise HTTPException(404, "YouTube Music doesn't have an artist page for this song.")
+    _artist_lists[video_id] = lst
+    return {"artists": lst}
+
+
 _album_ids: dict[str, str] = {}
 
 
@@ -462,6 +563,7 @@ def update_liked_cache(video_id: str, liked: bool, track: dict | None) -> None:
             "id": video_id,
             "title": str(t.get("title") or ""),
             "artists": str(t.get("artists") or ""),
+            "artistList": t.get("artistList") if isinstance(t.get("artistList"), list) else [],
             "album": str(t.get("album") or ""),
             "albumId": t.get("albumId") if isinstance(t.get("albumId"), str) else None,
             "duration": t.get("duration") if isinstance(t.get("duration"), (int, float)) else 0,
@@ -591,6 +693,7 @@ def add_to_playlist(body: AddBody):
             "id": vid,
             "title": str(t.get("title") or ""),
             "artists": str(t.get("artists") or ""),
+            "artistList": t.get("artistList") if isinstance(t.get("artistList"), list) else [],
             "album": str(t.get("album") or ""),
             "albumId": t.get("albumId") if isinstance(t.get("albumId"), str) else None,
             "duration": t.get("duration") if isinstance(t.get("duration"), (int, float)) else 0,

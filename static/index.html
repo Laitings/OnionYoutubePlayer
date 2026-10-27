@@ -138,6 +138,22 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 #herodesc.open { display: block; }
 .head.album { display: none; }
 
+#hero.artist #herocover { border-radius: 50%; }
+.artlink { cursor: pointer; }
+.artlink:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+#heroby .artlink:hover { color: var(--accent); }
+#rowshead { margin: 8px 10px 6px; font: 600 22px/1.2 var(--head); }
+.shelf { margin: 0 0 22px; }
+.shelf h2 { margin: 0 10px 12px; font: 600 22px/1.2 var(--head); }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 16px 14px; padding: 0 10px; }
+.card2 { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 10px; text-align: left; background: none; border: 0; border-radius: 12px; color: var(--text); }
+.card2:hover { background: var(--raise); }
+.card2 img { padding: 0; width: 100%; aspect-ratio: 1; border-radius: 8px; object-fit: cover; background: var(--raise); margin-bottom: 6px; }
+.card2.round img { border-radius: 50%; }
+.card2.round { align-items: center; text-align: center; }
+.card2 .ct { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.card2 .cs { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 13px; }
+
 /* ---- player bar ---- */
 #player { grid-area: player; background: var(--panel); border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(180px, 1fr) minmax(300px, 2fr) minmax(180px, 1fr); gap: 20px; align-items: center; padding: 10px 22px; min-height: 84px; }
 .np { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -293,6 +309,8 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
           <p id="herodesc" hidden></p>
         </div>
       </section>
+      <div id="shelves"></div>
+      <h2 id="rowshead" hidden>Popular songs</h2>
       <div id="rows"></div>
     </div>
   </main>
@@ -558,13 +576,14 @@ async function backgroundSync(synced) {
   } finally { bgRunning = false; $("#bgstatus").textContent = ""; }
 }
 
+const isPage = id => /^(MPRE|UC|MPLA)/.test(id);   // album and artist pages, which have a header and are not in the playlist list
 async function openPlaylist(id, full = false) {
   S.plId = id; store.set("last", id);
-  if (!/^MPRE/.test(id)) showHero(null);
+  if (!isPage(id)) showHero(null);
   renderPlaylists();
   $("#side").classList.remove("open");
   const meta = S.playlists.find(p => p.id === id);
-  $("#plname").textContent = meta ? meta.title : /^MPRE/.test(id) ? "Album" : "Playlist";
+  $("#plname").textContent = meta ? meta.title : /^MPRE/.test(id) ? "Album" : /^(UC|MPLA)/.test(id) ? "Artist" : "Playlist";
   if (S.scope === "one") $("#plmeta").textContent = "Loading…";
   const seq = ++S.seq, url = `/api/playlist/${encodeURIComponent(id)}`;
   try {
@@ -598,26 +617,57 @@ const prep = (t, n, pl = "", g = 0, pid = t.pid) => ({ ...t, n, pl, g, pid, _h: 
 /* ---------- album page: big cover, title, artist, year, play buttons ---------- */
 const hero = $("#hero");
 const playTime = sec => { const m = Math.round(sec / 60), h = Math.floor(m / 60); return h ? `${h} hr ${m % 60} min` : `${Math.max(1, m)} min`; };
+const artistsHtml = (t, terms = []) => {
+  const list = t.artistList;
+  if (list && list.length) return list.map(a => a.id ? `<span class="artlink" data-n="${esc(a.name)}">${hl(a.name, terms)}</span>` : hl(a.name, terms)).join(", ");
+  return t.artists ? `<span class="artlink" data-n="">${hl(t.artists, terms)}</span>` : "";
+};
+function showShelves(ar) {
+  const card = (x, round, sub) => `<button class="card2${round ? " round" : ""}" data-id="${esc(x.id)}"><img loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/logo.svg'" src="${x.art ? esc(artUrl(x.art, 320)) : '/logo.svg'}"><span class="ct">${esc(x.title)}</span><span class="cs">${esc(sub)}</span></button>`;
+  const shelf = (title, items, round, sub) => items.length ? `<section class="shelf"><h2>${title}</h2><div class="cards">${items.map(x => card(x, round, sub(x))).join("")}</div></section>` : "";
+  $("#shelves").innerHTML = ar ? shelf("Albums", ar.albums, false, x => [x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "))
+    + shelf("Singles & EPs", ar.singles, false, x => [x.year, x.type].filter(Boolean).join(" · "))
+    + shelf("Fans might also like", ar.related, true, x => x.subscribers ? x.subscribers + " subscribers" : "Artist") : "";
+}
+$("#shelves").addEventListener("click", e => {
+  const c = e.target.closest(".card2");
+  if (c) openPage(c.dataset.id);
+});
 function showHero(data) {
-  const al = data && data.album;
-  hero.hidden = !al;
-  $(".head").classList.toggle("album", !!al);
-  if (!al) return;
-  const n = data.tracks.length, img = $("#herocover");
-  $("#herokind").textContent = al.type || "Album";
-  $("#heroexp").hidden = !al.explicit;
+  const al = data && data.album, ar = data && data.artist;
+  hero.hidden = !(al || ar);
+  hero.classList.toggle("artist", !!ar);
+  $(".head").classList.toggle("album", !!(al || ar));
+  $("#herofav").hidden = !al;
+  $("#rowshead").hidden = !ar;
+  showShelves(ar);
+  if (!al && !ar) return;
+  const n = data.tracks.length, img = $("#herocover"), src = al || ar;
+  $("#herokind").textContent = ar ? "Artist" : (al.type || "Album");
+  $("#heroexp").hidden = !(al && al.explicit);
   $("#herotitle").textContent = data.title;
-  $("#heroby").textContent = al.artists || "";
-  $("#herostats").textContent = [al.year, `${n} ${n === 1 ? "song" : "songs"}`, al.seconds ? playTime(al.seconds) : ""].filter(Boolean).join(" · ");
+  if (ar) {
+    $("#heroby").textContent = ar.stats || "";
+    $("#herostats").textContent = ar.views || "";
+  } else {
+    const list = (al.artistList || []).filter(a => a.id);
+    $("#heroby").innerHTML = list.length ? list.map(a => `<span class="artlink" data-id="${esc(a.id)}">${esc(a.name)}</span>`).join(", ") : esc(al.artists || "");
+    $("#herostats").textContent = [al.year, `${n} ${n === 1 ? "song" : "songs"}`, al.seconds ? playTime(al.seconds) : ""].filter(Boolean).join(" · ");
+  }
   img.onerror = () => { img.onerror = null; img.src = "/logo.svg"; };
-  img.src = al.cover ? artUrl(al.cover, 544) : "/logo.svg";
+  const pic = ar ? ar.image : al.cover;
+  img.src = pic ? artUrl(pic, 544) : "/logo.svg";
   const d = $("#herodesc");
-  d.hidden = !al.description;
-  d.textContent = al.description || "";
+  d.hidden = !src.description;
+  d.textContent = src.description || "";
   d.classList.remove("open");
   d.title = "Click to read more";
   paintFav();
 }
+$("#heroby").addEventListener("click", e => {
+  const a = e.target.closest(".artlink");
+  if (a && a.dataset.id) openPage(a.dataset.id);
+});
 $("#herodesc").onclick = e => e.currentTarget.classList.toggle("open");
 $("#heroplay").onclick = () => {
   const t = S.view.find(x => x.ok);
@@ -741,11 +791,11 @@ function render() {
     <div class="row${t.ok ? "" : " off"}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
       <span class="idx"><span class="num">${t.n}</span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
       <img class="art" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(t.art, 96))}">
-      <span class="main"><span class="title">${hl(t.title, terms)}</span><span class="sub">${hl(t.artists, terms)}</span></span>
+      <span class="main"><span class="title">${hl(t.title, terms)}</span><span class="sub">${artistsHtml(t, terms)}</span></span>
       <span class="alb">${all ? hl(t.pl, terms) : t.album ? `<span class="albtxt" title="Go to this album">${hl(t.album, terms)}</span>` : ""}</span>
       <button class="star${lk && lk.has(t.id) ? " on" : ""}" tabindex="-1" aria-label="Like" title="${lk && lk.has(t.id) ? "Remove from liked songs" : "Add to liked songs"}"><svg viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
       <button class="rowmenu" tabindex="-1" aria-label="More" aria-haspopup="menu" aria-expanded="false" title="More"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg></button>
-      <span class="dur">${t.ok ? fmt(t.duration) : "Unavailable"}</span>
+      <span class="dur">${t.ok ? (t.duration ? fmt(t.duration) : "") : "Unavailable"}</span>
     </div>`).join("")
     : `<div class="empty"><b>${terms.length ? "No matches" : all ? "Nothing synced yet" : "No songs here"}</b>${
         terms.length ? "Search checks title, artist and album." : all ? "Open playlists or use Sync all playlists, then search across them." : "This playlist is empty."}</div>`;
@@ -804,6 +854,8 @@ document.querySelectorAll(".seg button").forEach(b => b.onclick = () => { S.scop
 $("#tracks").addEventListener("click", e => {
   const row = e.target.closest(".row");
   const t = row && S.view[+row.dataset.i];
+  const al = e.target.closest(".artlink");
+  if (al) { if (t) goToArtist(t, al.dataset.n); return; }
   if (e.target.closest(".albtxt")) { if (t) goToAlbum(t); return; }
   const mb = e.target.closest(".rowmenu");
   if (mb) { if (t) { if (!menu.hidden && mAnchor === mb) closeMenu(); else mainMenu(t, mb); } return; }
@@ -940,7 +992,7 @@ function markPlaying() {
 }
 function showNowPlaying(t) {
   $("#nptitle").textContent = t.title;
-  $("#npartist").textContent = t.artists;
+  $("#npartist").innerHTML = artistsHtml(t);
   const img = $("#npart");
   img.onerror = () => { img.onerror = null; img.src = "/logo.svg"; };   // no cover or it failed to load: show the logo
   img.src = t.art ? artUrl(t.art, 160) : "/logo.svg";
@@ -957,6 +1009,11 @@ function showNowPlaying(t) {
     });
   }
 }
+
+$("#npartist").addEventListener("click", e => {
+  const a = e.target.closest(".artlink");
+  if (a && S.cur) goToArtist(S.cur, a.dataset.n);
+});
 
 /* seek + time */
 const seek = $("#seek"), vol = $("#vol");
@@ -1115,7 +1172,7 @@ async function toggleLike(t) {
   try {
     await api("/api/like", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: t.id, liked: want, track: { title: t.title, artists: t.artists, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }),
+      body: JSON.stringify({ id: t.id, liked: want, track: { title: t.title, artists: t.artists, artistList: t.artistList, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }),
     });
     mirrorLiked(t, want);
     toast(want ? `Added “${t.title}” to liked songs` : `Removed “${t.title}” from liked songs`);
@@ -1160,6 +1217,7 @@ const ICON_STAR = '<svg class="ico-star" viewBox="0 0 24 24"><path d="M12 17.27 
 const ICON_LIST = '<svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>';
 const ICON_ALBUM = '<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"/></svg>';
 const ICON_ADD = '<svg viewBox="0 0 24 24"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
+const ICON_PERSON = '<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
 const ICON_BACK = '<svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>';
 const ICON_REMOVE = '<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
 function closeMenu() {
@@ -1191,6 +1249,7 @@ function mainMenu(track = S.cur, anchor = dots) {
     ${canRemove ? `<button role="menuitem" data-act="remove" class="danger">${ICON_REMOVE}<span class="t">Remove from playlist</span></button>` : ""}
     <button role="menuitem" data-act="like" class="${on ? "on" : ""}"${off}>${ICON_STAR}<span class="t">${on ? "Remove from liked songs" : "Add to liked songs"}</span></button>
     <button role="menuitem" data-act="addpl"${off}>${ICON_ADD}<span class="t">Add to playlist</span></button>
+    <button role="menuitem" data-act="artist"${off}>${ICON_PERSON}<span class="t">Go to artist</span></button>
     <button role="menuitem" data-act="album"${t && t.id && t.album ? "" : " disabled"}>${ICON_ALBUM}<span class="t">Go to album</span></button>
     <button role="menuitem" data-act="find"${off}>${ICON_LIST}<span class="t">Find in playlists</span></button>
     ${t ? "" : '<div class="cap">Play a song to use these.</div>'}`);
@@ -1237,7 +1296,7 @@ async function addMenu() {
   if (menu.hidden || mt !== t) return;
   const lists = S.playlists.filter(p => p.id !== "LM");
   showMenu(head + `<div class="cap">Add “${esc(t.title)}” to:</div>` + (lists.length ? lists.map(p => has.has(p.id)
-    ? `<button role="menuitem" data-act="addto-no" disabled><span class="t">${esc(p.title)}</span><span class="n">already in</span></button>`
+    ? `<button role="menuitem" data-act="go" data-pl="${esc(p.id)}" title="Already added. Click to jump to the song"><span class="t">${esc(p.title)}</span><span class="n">✓ already added</span></button>`
     : `<button role="menuitem" data-act="addto" data-pl="${esc(p.id)}"><span class="t">${esc(p.title)}</span></button>`).join("") : '<div class="cap">No playlists yet.</div>'));
   menu.querySelector('[data-act="addto"]')?.focus();
 }
@@ -1246,7 +1305,7 @@ async function addToPlaylist(t, pid) {
   const pl = S.playlists.find(p => p.id === pid), name = pl ? pl.title : "the playlist";
   try {
     const r = await api("/api/addtoplaylist", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playlist: pid, id: t.id, track: { title: t.title, artists: t.artists, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }) });
+      body: JSON.stringify({ playlist: pid, id: t.id, track: { title: t.title, artists: t.artists, artistList: t.artistList, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }) });
     S.allTracks = null;
     if (S.plId === pid && S.sig.startsWith(pid + ":")) {   // that playlist is on screen: add the row
       S.tracks = [...S.tracks, { ...t, sid: r.sid || null }].map((x, i) => prep(x, i + 1, "", 0, pid));
@@ -1276,6 +1335,47 @@ async function findMenu() {
     + `<div class="cap">${d.playlists.length ? `In ${d.playlists.length} ${d.playlists.length === 1 ? "playlist" : "playlists"}. Click one to jump to the song.` : "Not found in any saved playlist."}</div>`
     + items + (partial ? `<hr><div class="cap">${partial}</div>` : ""));
   menu.querySelector('[data-act="go"]')?.focus();
+}
+function openPage(id, focusId) {
+  closeMenu();
+  S.q = ""; $("#q").value = "";
+  S.scope = "one"; syncScopeButtons();
+  S.focus = focusId ? { id: focusId, at: Date.now() } : null;
+  S.sig = "";
+  openPlaylist(id);
+  $("#tracks").scrollTop = 0;
+}
+async function artistsOf(t) {
+  const known = (t.artistList || []).filter(a => a.id);
+  if (known.length) return known;
+  if (!t.id) throw new Error("There's no artist page for this song.");
+  const r = await api(`/api/artists/${encodeURIComponent(t.id)}`);   // saved before artist ids were remembered
+  t.artistList = r.artists;
+  return r.artists;
+}
+async function goToArtist(t, name) {
+  closeMenu();
+  if (!t) return;
+  let list;
+  try {
+    if (!(t.artistList || []).some(a => a.id)) toast("Finding the artist…");
+    list = await artistsOf(t);
+  } catch (e) { return onApiError(e); }
+  openPage(((name && list.find(a => a.name === name)) || list[0]).id);
+}
+async function artistMenu() {
+  const t = mt;
+  if (!t) return;
+  const head = `<button role="menuitem" data-act="back">${ICON_BACK}<span class="t">Back</span></button><hr>`;
+  showMenu(head + '<div class="cap">Looking…</div>');
+  menu.querySelector("button")?.focus();
+  let list;
+  try { list = await artistsOf(t); }
+  catch (e) { if (!menu.hidden) showMenu(head + `<div class="cap">${esc(e.message)}</div>`); return; }
+  if (menu.hidden || mt !== t) return;
+  if (list.length === 1) return openPage(list[0].id);
+  showMenu(head + list.map(a => `<button role="menuitem" data-act="goartist" data-id="${esc(a.id)}"><span class="t">${esc(a.name)}</span></button>`).join(""));
+  menu.querySelector('[data-act="goartist"]')?.focus();
 }
 async function goToAlbum(t) {
   closeMenu();
@@ -1307,6 +1407,8 @@ menu.addEventListener("click", e => {
   const act = b.dataset.act, t = mt;
   if (act === "like") { closeMenu(); toggleLike(t); }
   else if (act === "album") goToAlbum(t);
+  else if (act === "artist") artistMenu();
+  else if (act === "goartist") openPage(b.dataset.id);
   else if (act === "addpl") addMenu();
   else if (act === "addto") addToPlaylist(t, b.dataset.pl);
   else if (act === "find") findMenu();
