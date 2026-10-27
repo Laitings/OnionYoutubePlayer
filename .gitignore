@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+cache/
+browser.json
+cookies.txt
+cookies.auto.txt
+config.json
+onion.log
