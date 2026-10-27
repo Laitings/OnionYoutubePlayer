@@ -6,6 +6,8 @@ A local player for your YouTube Music library. It loads whole playlists at once,
 
 **Like an app (no console window, no address bar):** double-click `Onion Player.vbs`. It starts the server hidden and opens the player in its own window. When you close that window the server stops by itself after a few minutes. To get a desktop shortcut with the onion icon, double-click `Make desktop shortcut.vbs` once (you can then right-click it and pin it to the taskbar or Start). The first time you still need to run `run.bat` once, because that sets up the Python environment. Anything the hidden server prints goes to `onion.log`.
 
+The app window opens the way you left it: its size, position and maximized state are saved in `window.json` (next to `app.py`) while you use it. Delete that file to go back to the default size. This only applies to the app window opened by `Onion Player.vbs`.
+
 **With a console window:** double-click `run.bat`. It opens `http://127.0.0.1:8765` in your browser and keeps running until you close the console window. Useful when something misbehaves, because you can see what it says.
 
 The first run needs Python 3.10 or newer; it installs the packages by itself. The app window uses Edge (or Chrome if Edge is missing). You can also open the page in Edge and choose "Install this site as an app".

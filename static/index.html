@@ -1565,6 +1565,25 @@ document.addEventListener("pointerdown", e => {
 $("#tracks").addEventListener("scroll", () => { if (!menu.hidden && mAnchor !== dots) closeMenu(); }, { passive: true });
 addEventListener("resize", () => { if (!menu.hidden) placeMenu(); });
 
+/* remembers the app window's size and position: "Onion Player.vbs" opens the window with these next time.
+   Only an app window counts (not a browser tab), and a minimized window is ignored. */
+(() => {
+  const isApp = matchMedia("(display-mode: standalone)").matches || matchMedia("(display-mode: minimal-ui)").matches || !window.locationbar.visible;
+  if (!isApp) return;
+  let last = "";
+  const save = () => {
+    const x = Math.round(screenX), y = Math.round(screenY), w = Math.round(outerWidth), h = Math.round(outerHeight);
+    if (x < -10000 || w < 300 || h < 300) return;
+    const maximized = w >= screen.availWidth - 20 && h >= screen.availHeight - 20;
+    const key = [x, y, w, h, maximized].join();
+    if (key === last) return;
+    last = key;
+    try { navigator.sendBeacon("/api/window", new Blob([JSON.stringify({ x, y, w, h, maximized })], { type: "application/json" })); } catch { /* not worth a message */ }
+  };
+  setInterval(save, 3000);
+  addEventListener("pagehide", save);
+})();
+
 /* tells the server this window is still open (when started with "Onion Player.vbs" it stops itself after the window closes) */
 const ping = () => fetch("/api/ping").catch(() => {});
 ping();

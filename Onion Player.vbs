@@ -27,6 +27,37 @@ Function Up()
   On Error GoTo 0
 End Function
 
+' The window comes back the way you left it: the page saves its size and position in window.json.
+' Without that file (first run) it opens at 1280 x 820.
+Function JsonInt(text, key)
+  Dim re, m
+  JsonInt = ""
+  Set re = CreateObject("VBScript.RegExp")
+  re.Pattern = """" & key & """\s*:\s*(-?\d+)"
+  Set m = re.Execute(text)
+  If m.Count > 0 Then JsonInt = m(0).SubMatches(0)
+End Function
+
+Function WindowArgs()
+  Dim f, text, w, h, x, y
+  WindowArgs = " --window-size=1280,820"
+  f = dir & "\window.json"
+  If Not fso.FileExists(f) Then Exit Function
+  text = ""
+  On Error Resume Next
+  text = fso.OpenTextFile(f, 1).ReadAll
+  On Error GoTo 0
+  w = JsonInt(text, "w")
+  h = JsonInt(text, "h")
+  x = JsonInt(text, "x")
+  y = JsonInt(text, "y")
+  If w <> "" And h <> "" Then
+    If CLng(w) >= 500 And CLng(h) >= 350 Then WindowArgs = " --window-size=" & w & "," & h
+    If x <> "" And y <> "" Then WindowArgs = WindowArgs & " --window-position=" & x & "," & y
+  End If
+  If InStr(text, """max"": true") > 0 Then WindowArgs = WindowArgs & " --start-maximized"
+End Function
+
 If Not Up() Then
   py = dir & "\.venv\Scripts\python.exe"
   If Not fso.FileExists(py) Then
@@ -70,5 +101,5 @@ Next
 If browser = "" Then
   sh.Run url, 1, False
 Else
-  sh.Run """" & browser & """ --app=" & url & " --window-size=1280,820", 1, False
+  sh.Run """" & browser & """ --app=" & url & WindowArgs(), 1, False
 End If

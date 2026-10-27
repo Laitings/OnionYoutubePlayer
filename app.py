@@ -1044,6 +1044,37 @@ async def audio(video_id: str, request: Request):
         return StreamingResponse(body(), status_code=upstream.status_code, headers=keep)
 
 
+# ---------------------------------------------------------------- remember the app window's size and position
+
+WINDOW_FILE = BASE / "window.json"   # read by "Onion Player.vbs" when it opens the window
+
+
+class WindowBody(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+    maximized: bool = False
+
+
+@app.post("/api/window")
+def save_window(body: WindowBody):
+    if not (300 <= body.w <= 10000 and 300 <= body.h <= 10000 and -10000 <= body.x <= 20000 and -10000 <= body.y <= 20000):
+        raise HTTPException(400, "Odd window size")
+    data = {"x": body.x, "y": body.y, "w": body.w, "h": body.h, "max": False}
+    if body.maximized:   # keep the size it had before, so un-maximizing later still goes back to it
+        try:
+            old = json.loads(WINDOW_FILE.read_text("utf-8"))
+            data = {**{k: old[k] for k in ("x", "y", "w", "h") if isinstance(old.get(k), int)}, "max": True}
+        except (OSError, ValueError):
+            data = {"max": True}
+    try:
+        WINDOW_FILE.write_text(json.dumps(data), "utf-8")
+    except OSError:
+        pass
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- stop when the window is closed
 
 AUTO_QUIT = bool(os.environ.get("ONION_AUTOQUIT"))   # set by "Onion Player.vbs", not by run.bat
