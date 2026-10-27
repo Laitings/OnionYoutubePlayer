@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import queue
+import random
 import re
 import shutil
 import sys
@@ -462,6 +463,77 @@ def search_music(q: str = "", songs: int = 30, albums: int = 12, artists: int = 
             "id": a["browseId"], "title": a.get("artist") or "", "art": thumb(a),
         } for a in raw_artists if a.get("browseId")],
     }
+
+
+def simplify_watch(t: dict) -> dict:
+    """A song from a radio / 'up next' list, shaped like a playlist song (these have a 'length' text and a single 'thumbnail' list)."""
+    thumbs = t.get("thumbnail") or t.get("thumbnails") or []
+    album = t.get("album") or {}
+    secs = t.get("duration_seconds") or 0
+    if not secs and t.get("length"):
+        try:
+            for part in str(t["length"]).split(":"):
+                secs = secs * 60 + int(part)
+        except ValueError:
+            secs = 0
+    vid = t.get("videoId")
+    return {
+        "id": vid, "title": t.get("title") or "", "artists": ", ".join(a["name"] for a in (t.get("artists") or []) if a.get("name")),
+        "artistList": artist_list(t.get("artists")), "album": album.get("name") or "", "albumId": album.get("id"),
+        "duration": secs, "art": thumbs[-1]["url"] if thumbs else None, "ok": bool(vid), "type": t.get("videoType"), "sid": None,
+    }
+
+
+_suggest_cache: dict[str, tuple[float, list]] = {}
+SUGGEST_TTL = 6 * 3600
+
+
+@app.get("/api/suggest/{pid}")
+def suggest(pid: str, refresh: int = 0):
+    """Songs you might like to add to a playlist: YouTube Music's own suggestions for playlists you own, the radio of the whole
+    playlist, and the radio of a few songs picked from it. Songs already in the playlist are left out."""
+    safe_id(pid)
+    if is_album(pid) or is_artist(pid):
+        return {"songs": []}
+    tracks = (read_cache(pid) or {}).get("tracks") or []
+    have = {t.get("id") for t in tracks}
+    hit = _suggest_cache.get(pid)
+    if hit and not refresh and time.time() - hit[0] < SUGGEST_TTL:
+        return {"songs": [t for t in hit[1] if t["id"] not in have], "cached": True}   # minus what was added since
+    yt = get_yt()
+    pool = [t for t in tracks if t.get("ok") and t.get("id")]
+    seeds = random.sample(pool, min(2, len(pool)))
+    sources: list[list[dict]] = []
+    errors: list[str] = []
+
+    def attempt(label: str, fn):
+        try:
+            with _yt_lock:
+                sources.append(fn())
+        except HTTPException:
+            raise
+        except Exception as exc:
+            errors.append(f"{label}: {exc.__class__.__name__}: {str(exc)[:160]}")
+            print(f"suggest {label} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+
+    if pid != "LM":   # YouTube Music only offers its own suggestions on playlists you own
+        attempt("suggestions", lambda: [simplify(t) for t in yt.get_playlist(pid, limit=0, suggestions_limit=30).get("suggestions") or []])
+    attempt("playlist radio", lambda: [simplify_watch(t) for t in yt.get_watch_playlist(playlistId=pid, radio=True, limit=40).get("tracks") or []])
+    for s in seeds:
+        attempt("song radio", lambda s=s: [simplify_watch(t) for t in yt.get_watch_playlist(videoId=s["id"], radio=True, limit=25).get("tracks") or []])
+
+    songs, seen = [], set(have)
+    for rank in range(max((len(x) for x in sources), default=0)):   # take one from each source in turn, so they mix
+        for src in sources:
+            if rank < len(src):
+                t = src[rank]
+                if t["id"] and t["ok"] and t["id"] not in seen:
+                    seen.add(t["id"]); songs.append(t)
+    songs = songs[:40]
+    if not songs and errors:
+        raise HTTPException(502, errors[0])
+    _suggest_cache[pid] = (time.time(), songs)
+    return {"songs": songs, "cached": False}
 
 
 def album_entry(bid: str, data: dict) -> dict:

@@ -146,6 +146,10 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 .artlink:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 #heroby .artlink:hover { color: var(--accent); }
 #rowshead { margin: 8px 10px 6px; font: 600 22px/1.2 var(--head); }
+#suggbox { margin: 30px 0 24px; }
+.sugghead { display: flex; align-items: center; justify-content: space-between; margin: 0 10px 2px; }
+.sugghead h2 { margin: 0; font: 600 22px/1.2 var(--head); }
+.suggnote { margin: 0 10px 10px; color: var(--faint); font-size: 13px; }
 .shelf { margin: 0 0 22px; }
 .shelf h2 { margin: 0 10px 12px; font: 600 22px/1.2 var(--head); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 16px 14px; padding: 0 10px; }
@@ -316,6 +320,11 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
       <div id="shelves"></div>
       <h2 id="rowshead" hidden>Popular songs</h2>
       <div id="rows"></div>
+      <section id="suggbox" hidden>
+        <div class="sugghead"><h2>Suggested songs</h2><button id="suggrefresh" class="ghost">Refresh</button></div>
+        <p class="suggnote">Based on the songs in this playlist. Use the three dots on a song to add it.</p>
+        <div id="sugg"></div>
+      </section>
     </div>
   </main>
 
@@ -449,7 +458,7 @@ const S = {
   view: [], queue: [], order: [], pos: -1, cur: null, fails: 0,
   liked: null,    // Set of liked song ids, once Liked songs has been read
   albums: null, favAlbums: null,   // the favorite albums list (your YouTube Music library albums), and its ids
-  tab: store.get("tab", "playlists"), results: null,   // results: the last YouTube Music search
+  tab: store.get("tab", "playlists"), results: null, sugg: [], suggFor: null,   // results: the last YouTube Music search
   focus: null,    // {id, at}: a song to scroll to and flash the next time the list is drawn
   shuffle: store.get("shuffle", false), repeat: store.get("repeat", "off"),
 };
@@ -619,6 +628,7 @@ async function openPlaylist(id, full = false) {
   S.plId = id; store.set("last", id);
   pushNav(id);
   if (!isPage(id)) showHero(null);
+  $("#suggbox").hidden = true;
   renderPlaylists();
   $("#side").classList.remove("open");
   const meta = S.playlists.find(p => p.id === id);
@@ -629,6 +639,7 @@ async function openPlaylist(id, full = false) {
     const data = await api(url + (full ? "?refresh=1&full=1" : ""));
     if (seq !== S.seq) return;
     applyPlaylist(data);
+    loadSuggest(id);
     if (data.cached) {   // show the saved copy right away, then quietly check for changes
       const base = $("#plmeta").textContent;
       $("#plmeta").textContent = base + ", checking for changes…";
@@ -884,9 +895,47 @@ function render() {
     </div>`).join("")
     : `<div class="empty"><b>${terms.length ? "No matches" : all ? "Nothing synced yet" : S.plId === "search" ? "No songs found" : "No songs here"}</b>${
         terms.length ? "Search checks title, artist and album." : all ? "Open playlists or use Sync all playlists, then search across them." : S.plId === "search" ? "Try other words, or look at the albums and artists above." : "This playlist is empty."}</div>`;
+  paintSugg();
   markPlaying();
   focusRow();
 }
+
+/* ---------- suggested songs at the end of a playlist (not on albums, artists or search) ---------- */
+const rowList = row => row.closest("#sugg") ? S.sugg : S.view;
+let suggSeq = 0;
+async function loadSuggest(id, refresh = false) {
+  if (isPage(id) || id === "search" || S.scope !== "one") return;
+  if (!refresh && S.suggFor === id && S.sugg.length) return paintSugg();
+  const seq = ++suggSeq, btn = $("#suggrefresh");
+  S.suggFor = id; S.sugg = [];
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/suggest/${encodeURIComponent(id)}${refresh ? "?refresh=1" : ""}`);
+    if (seq !== suggSeq) return;
+    S.sugg = r.songs.map((t, i) => prep(t, i + 1, "", 0, "suggest"));
+  } catch (e) {
+    if (seq === suggSeq && e.status === 401) onApiError(e);   // anything else: just no suggestions
+  } finally { if (seq === suggSeq) btn.disabled = false; }
+  if (seq === suggSeq) paintSugg();
+}
+function paintSugg() {
+  const box = $("#suggbox");
+  const show = S.suggFor === S.plId && S.sugg.length && S.scope === "one" && !S.q.trim() && S.plId !== "search" && !isPage(S.plId || "");
+  box.hidden = !show;
+  if (!show) return;
+  const lk = S.liked;
+  $("#sugg").innerHTML = S.sugg.map((t, i) => `
+    <div class="row${t.ok ? "" : " off"}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
+      <span class="idx"><span class="num">${i + 1}</span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+      <img class="art" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(t.art, 96))}">
+      <span class="main"><span class="title">${esc(t.title)}</span><span class="sub">${artistsHtml(t)}</span></span>
+      <span class="alb">${t.album ? `<span class="albtxt" title="Go to this album">${esc(t.album)}</span>` : ""}</span>
+      <button class="star${lk && lk.has(t.id) ? " on" : ""}" tabindex="-1" aria-label="Like" title="${lk && lk.has(t.id) ? "Remove from liked songs" : "Add to liked songs"}"><svg viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
+      <button class="rowmenu" tabindex="-1" aria-label="More" aria-haspopup="menu" aria-expanded="false" title="More"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg></button>
+      <span class="dur">${t.duration ? fmt(t.duration) : ""}</span>
+    </div>`).join("");
+}
+$("#suggrefresh").onclick = () => loadSuggest(S.plId, true);
 
 /* A song to find after the list is drawn: scroll it into the middle and flash it. */
 function focusRow() {
@@ -939,20 +988,20 @@ document.querySelectorAll(".seg button").forEach(b => b.onclick = () => { S.scop
 /* ---------- playback ---------- */
 $("#tracks").addEventListener("click", e => {
   const row = e.target.closest(".row");
-  const t = row && S.view[+row.dataset.i];
+  const t = row && rowList(row)[+row.dataset.i];
   const al = e.target.closest(".artlink");
   if (al) { if (t) goToArtist(t, al.dataset.n); return; }
   if (e.target.closest(".albtxt")) { if (t) goToAlbum(t); return; }
   const mb = e.target.closest(".rowmenu");
   if (mb) { if (t) { if (!menu.hidden && mAnchor === mb) closeMenu(); else mainMenu(t, mb); } return; }
   if (e.target.closest(".star")) { if (t) toggleLike(t); return; }
-  if (t && t.ok) startQueue(S.view, t);
+  if (t && t.ok) startQueue(rowList(row), t);
 });
 $("#tracks").addEventListener("keydown", e => {
   if (e.key !== "Enter" || e.target.closest(".star, .rowmenu")) return;
   const row = e.target.closest(".row");
-  const t = row && S.view[+row.dataset.i];
-  if (t && t.ok) startQueue(S.view, t);
+  const t = row && rowList(row)[+row.dataset.i];
+  if (t && t.ok) startQueue(rowList(row), t);
 });
 
 function buildOrder(startIdx) {
@@ -1061,7 +1110,7 @@ $("#tracks").addEventListener("mouseover", e => {
   if (row === hoverRow) return;
   hoverRow = row;
   clearTimeout(hoverTimer);
-  const t = row && S.view[+row.dataset.i];
+  const t = row && rowList(row)[+row.dataset.i];
   if (!t || !t.ok || Date.now() - (warmedAt.get(t.id) || 0) < 80 * 60 * 1000) return;
   hoverTimer = setTimeout(async () => {
     if (warmBusy) return;
@@ -1393,6 +1442,7 @@ async function addToPlaylist(t, pid) {
     const r = await api("/api/addtoplaylist", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playlist: pid, id: t.id, track: { title: t.title, artists: t.artists, artistList: t.artistList, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }) });
     S.allTracks = null;
+    if (pid === S.suggFor) S.sugg = S.sugg.filter(x => x.id !== t.id);
     if (S.plId === pid && S.sig.startsWith(pid + ":")) {   // that playlist is on screen: add the row
       S.tracks = [...S.tracks, { ...t, sid: r.sid || null }].map((x, i) => prep(x, i + 1, "", 0, pid));
       S.sig = pid + ":" + S.tracks.map(x => x.id).join();
