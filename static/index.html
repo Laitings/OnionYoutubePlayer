@@ -56,6 +56,9 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 .pl:hover { background: var(--raise); color: var(--text); }
 .pl.active { background: var(--raise); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
 .pl .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 8px; padding: 9px 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr:hover { background: var(--raise); color: var(--text); }
+.sr.back { color: var(--accent); }
 .pl .n { font-family: var(--head); color: var(--faint); font-variant-numeric: tabular-nums; }
 .side-foot { padding: 12px 14px 14px; display: grid; gap: 8px; border-top: 1px solid var(--line); }
 .ghost { background: none; border: 1px solid var(--line); border-radius: 9px; padding: 7px 12px; color: var(--dim); }
@@ -252,6 +255,7 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
     <div class="tabs" role="tablist" aria-label="Sidebar">
       <button role="tab" data-tab="playlists" aria-selected="true">Playlists</button>
       <button role="tab" data-tab="albums" aria-selected="false">Albums</button>
+      <button role="tab" data-tab="search" aria-selected="false">Search</button>
     </div>
     <input id="plfilter" type="search" placeholder="Filter playlists" aria-label="Filter playlists" autocomplete="off">
     <nav id="playlists" aria-label="Playlists"></nav>
@@ -445,7 +449,7 @@ const S = {
   view: [], queue: [], order: [], pos: -1, cur: null, fails: 0,
   liked: null,    // Set of liked song ids, once Liked songs has been read
   albums: null, favAlbums: null,   // the favorite albums list (your YouTube Music library albums), and its ids
-  tab: store.get("tab", "playlists"),
+  tab: store.get("tab", "playlists"), results: null,   // results: the last YouTube Music search
   focus: null,    // {id, at}: a song to scroll to and flash the next time the list is drawn
   shuffle: store.get("shuffle", false), repeat: store.get("repeat", "off"),
 };
@@ -505,7 +509,14 @@ $("#setup-form").addEventListener("submit", async e => {
 function renderPlaylists() {
   const f = fold($("#plfilter").value.trim());
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)));
-  $("#plfilter").placeholder = S.tab === "albums" ? "Filter albums" : "Filter playlists";
+  $("#plfilter").placeholder = S.tab === "search" ? "Search all of YouTube Music" : S.tab === "albums" ? "Filter albums" : "Filter playlists";
+  if (S.tab === "search") {
+    const recent = store.get("recent", []);
+    const back = S.results && S.plId !== "search" ? `<button class="sr back" data-q="${esc(S.results.q)}" data-back="1">← Back to results for “${esc(S.results.q)}”</button>` : "";
+    $("#playlists").innerHTML = '<div class="sidecap">Songs, albums and artists from all of YouTube Music. Type and press Enter.</div>' + back
+      + (recent.length ? '<div class="sidecap">Recent searches</div>' + recent.map(r => `<button class="sr" data-q="${esc(r)}">${esc(r)}</button>`).join("") : "");
+    return;
+  }
   if (S.tab === "albums") {
     if (!S.albums) { $("#playlists").innerHTML = '<div class="sidecap">Loading your albums…</div>'; return; }
     const list = S.albums.filter(a => !f || fold(`${a.title} ${a.artists}`).includes(f));
@@ -523,7 +534,12 @@ function renderPlaylists() {
   }).join("");
 }
 $("#plfilter").addEventListener("input", renderPlaylists);
+$("#plfilter").addEventListener("keydown", e => {
+  if (e.key === "Enter" && S.tab === "search") runSearch(e.target.value);
+});
 $("#playlists").addEventListener("click", e => {
+  const sr = e.target.closest(".sr");
+  if (sr) { if (sr.dataset.back) showSearch(); else { $("#plfilter").value = sr.dataset.q; runSearch(sr.dataset.q); } return; }
   const b = e.target.closest(".pl");
   if (b) { S.scope = "one"; syncScopeButtons(); openPlaylist(b.dataset.id); return; }
   const a = e.target.closest(".al");
@@ -533,6 +549,7 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   S.tab = b.dataset.tab; store.set("tab", S.tab);
   $("#plfilter").value = "";
   renderPlaylists();
+  if (S.tab === "search") $("#plfilter").focus();
 });
 
 async function loadPlaylists() {
@@ -622,12 +639,12 @@ const artistsHtml = (t, terms = []) => {
   if (list && list.length) return list.map(a => a.id ? `<span class="artlink" data-n="${esc(a.name)}">${hl(a.name, terms)}</span>` : hl(a.name, terms)).join(", ");
   return t.artists ? `<span class="artlink" data-n="">${hl(t.artists, terms)}</span>` : "";
 };
+const shelfCard = (x, round, sub) => `<button class="card2${round ? " round" : ""}" data-id="${esc(x.id)}"><img loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/logo.svg'" src="${x.art ? esc(artUrl(x.art, 320)) : '/logo.svg'}"><span class="ct">${esc(x.title)}</span><span class="cs">${esc(sub)}</span></button>`;
+const shelfSec = (title, items, round, sub) => items.length ? `<section class="shelf"><h2>${title}</h2><div class="cards">${items.map(x => shelfCard(x, round, sub(x))).join("")}</div></section>` : "";
 function showShelves(ar) {
-  const card = (x, round, sub) => `<button class="card2${round ? " round" : ""}" data-id="${esc(x.id)}"><img loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/logo.svg'" src="${x.art ? esc(artUrl(x.art, 320)) : '/logo.svg'}"><span class="ct">${esc(x.title)}</span><span class="cs">${esc(sub)}</span></button>`;
-  const shelf = (title, items, round, sub) => items.length ? `<section class="shelf"><h2>${title}</h2><div class="cards">${items.map(x => card(x, round, sub(x))).join("")}</div></section>` : "";
-  $("#shelves").innerHTML = ar ? shelf("Albums", ar.albums, false, x => [x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "))
-    + shelf("Singles & EPs", ar.singles, false, x => [x.year, x.type].filter(Boolean).join(" · "))
-    + shelf("Fans might also like", ar.related, true, x => x.subscribers ? x.subscribers + " subscribers" : "Artist") : "";
+  $("#shelves").innerHTML = ar ? shelfSec("Albums", ar.albums, false, x => [x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "))
+    + shelfSec("Singles & EPs", ar.singles, false, x => [x.year, x.type].filter(Boolean).join(" · "))
+    + shelfSec("Fans might also like", ar.related, true, x => x.subscribers ? x.subscribers + " subscribers" : "Artist") : "";
 }
 $("#shelves").addEventListener("click", e => {
   const c = e.target.closest(".card2");
@@ -640,6 +657,7 @@ function showHero(data) {
   $(".head").classList.toggle("album", !!(al || ar));
   $("#herofav").hidden = !al;
   $("#rowshead").hidden = !ar;
+  $("#rowshead").textContent = "Popular songs";
   showShelves(ar);
   if (!al && !ar) return;
   const n = data.tracks.length, img = $("#herocover"), src = al || ar;
@@ -679,6 +697,49 @@ $("#heroshuf").onclick = () => {
   if (!S.shuffle) toggleShuffle();
   startQueue(S.view, ok[Math.floor(Math.random() * ok.length)]);
 };
+
+/* ---------- search all of YouTube Music: songs in the list, artists and albums as cards ---------- */
+let searchSeq = 0;
+async function runSearch(q) {
+  q = (q || "").trim();
+  if (q.length < 2) return toast("Type at least two characters.");
+  const seq = ++searchSeq;
+  S.seq++;   // a playlist that is still loading must not draw over the results
+  S.q = ""; $("#q").value = "";
+  S.scope = "one"; syncScopeButtons();
+  store.set("recent", [q, ...store.get("recent", []).filter(x => x.toLowerCase() !== q.toLowerCase())].slice(0, 12));
+  $("#side").classList.remove("open");
+  $("#plmeta").textContent = `Searching for “${q}”…`;
+  try {
+    const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
+    if (seq !== searchSeq) return;
+    S.results = r;
+    showSearch();
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    $("#plmeta").textContent = "Search failed";
+    onApiError(e);
+  }
+}
+function showSearch() {
+  const r = S.results;
+  if (!r) return;
+  S.seq++;
+  S.plId = "search";
+  showHero(null);
+  $("#shelves").innerHTML = shelfSec("Artists", r.artists, true, () => "Artist")
+    + shelfSec("Albums", r.albums, false, x => [x.artists, x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "));
+  $("#rowshead").textContent = "Songs";
+  $("#rowshead").hidden = !r.songs.length;
+  $("#plname").textContent = `Search: ${r.q}`;
+  $("#plmeta").textContent = `${r.songs.length} songs, ${r.albums.length} albums, ${r.artists.length} artists`;
+  S.sig = "search:" + r.q;
+  S.tracks = r.songs.map((t, i) => prep(t, i + 1, "", 0, "search"));
+  S.q = ""; $("#q").value = "";
+  render();
+  $("#tracks").scrollTop = 0;
+  renderPlaylists();
+}
 
 /* ---------- favorite albums (= albums in your YouTube Music library) ---------- */
 function setAlbums(list) {
@@ -744,6 +805,7 @@ function applyPlaylist(data) {
 
 $("#sync").onclick = async () => {
   if (S.scope === "all") return toast("Sync works on one playlist at a time. Open a playlist first.");
+  if (S.plId === "search") return runSearch(S.results && S.results.q);
   const b = $("#sync");
   b.disabled = true; b.textContent = "Syncing…";
   S.sig = "";
@@ -762,7 +824,7 @@ $("#syncall").onclick = async () => {
   S.allTracks = null; S.sig = "";
   b.disabled = false; b.textContent = "Sync all playlists";
   toast(failed ? `Synced with ${failed} failed` : "All playlists synced");
-  if (S.scope === "all") await showScope(); else openPlaylist(S.plId);
+  if (S.scope === "all") await showScope(); else if (S.plId === "search") showSearch(); else openPlaylist(S.plId);
 };
 
 /* ---------- search, sort, list ---------- */
@@ -797,8 +859,8 @@ function render() {
       <button class="rowmenu" tabindex="-1" aria-label="More" aria-haspopup="menu" aria-expanded="false" title="More"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg></button>
       <span class="dur">${t.ok ? (t.duration ? fmt(t.duration) : "") : "Unavailable"}</span>
     </div>`).join("")
-    : `<div class="empty"><b>${terms.length ? "No matches" : all ? "Nothing synced yet" : "No songs here"}</b>${
-        terms.length ? "Search checks title, artist and album." : all ? "Open playlists or use Sync all playlists, then search across them." : "This playlist is empty."}</div>`;
+    : `<div class="empty"><b>${terms.length ? "No matches" : all ? "Nothing synced yet" : S.plId === "search" ? "No songs found" : "No songs here"}</b>${
+        terms.length ? "Search checks title, artist and album." : all ? "Open playlists or use Sync all playlists, then search across them." : S.plId === "search" ? "Try other words, or look at the albums and artists above." : "This playlist is empty."}</div>`;
   markPlaying();
   focusRow();
 }
@@ -842,6 +904,7 @@ async function showScope() {
     $("#plmeta").textContent = `${S.allCount} playlists, ${S.allTracks.length} songs`;
     render();
   } else {
+    if (S.plId === "search") return showSearch();
     const meta = S.playlists.find(p => p.id === S.plId);
     $("#plname").textContent = meta ? meta.title : "Playlist";
     render();

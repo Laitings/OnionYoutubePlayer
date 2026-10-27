@@ -415,6 +415,55 @@ def all_cached():
     return {"playlists": out}
 
 
+@app.get("/api/search")
+def search_music(q: str = "", songs: int = 30, albums: int = 12, artists: int = 8):
+    """Searches all of YouTube Music (not just your library): songs, albums (incl. EPs and singles) and artists.
+    Songs come back shaped like playlist songs, so they play, like and open menus like any other row."""
+    q = q.strip()[:200]
+    if len(q) < 2:
+        raise HTTPException(400, "Type at least two characters.")
+    yt = get_yt()
+
+    def run(kind: str, limit: int) -> list[dict]:
+        try:
+            with _yt_lock:
+                return yt.search(q, filter=kind, limit=max(1, min(limit, 50))) or []
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if kind == "songs":
+                raise   # no songs at all means the search itself failed: report it
+            print(f"search {kind} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+            return []   # a failed albums/artists shelf shouldn't hide the songs
+
+    def thumb(x):
+        th = (x or {}).get("thumbnails") or []
+        return th[-1]["url"] if th else None
+
+    try:
+        raw_songs = run("songs", songs)
+        raw_albums = run("albums", albums)
+        raw_artists = run("artists", artists)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise api_error(exc, account_level=True)
+
+    return {
+        "q": q,
+        "songs": [simplify(t) for t in raw_songs if t.get("videoId")],
+        "albums": [{
+            "id": a["browseId"], "title": a.get("title") or "", "type": a.get("type") or "Album",
+            "year": str(a.get("year") or ""),
+            "artists": ", ".join(x["name"] for x in (a.get("artists") or []) if isinstance(x, dict) and x.get("name")),
+            "art": thumb(a),
+        } for a in raw_albums if a.get("browseId")],
+        "artists": [{
+            "id": a["browseId"], "title": a.get("artist") or "", "art": thumb(a),
+        } for a in raw_artists if a.get("browseId")],
+    }
+
+
 def album_entry(bid: str, data: dict) -> dict:
     al = data.get("album") or {}
     return {"id": bid, "title": data.get("title") or "", "artists": al.get("artists") or "", "year": al.get("year") or "",
