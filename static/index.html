@@ -1159,6 +1159,7 @@ let mt = null, mAnchor = dots;   // the song the menu is about, and the button i
 const ICON_STAR = '<svg class="ico-star" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>';
 const ICON_LIST = '<svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>';
 const ICON_ALBUM = '<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"/></svg>';
+const ICON_ADD = '<svg viewBox="0 0 24 24"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
 const ICON_BACK = '<svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>';
 const ICON_REMOVE = '<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
 function closeMenu() {
@@ -1189,6 +1190,7 @@ function mainMenu(track = S.cur, anchor = dots) {
   showMenu(`
     ${canRemove ? `<button role="menuitem" data-act="remove" class="danger">${ICON_REMOVE}<span class="t">Remove from playlist</span></button>` : ""}
     <button role="menuitem" data-act="like" class="${on ? "on" : ""}"${off}>${ICON_STAR}<span class="t">${on ? "Remove from liked songs" : "Add to liked songs"}</span></button>
+    <button role="menuitem" data-act="addpl"${off}>${ICON_ADD}<span class="t">Add to playlist</span></button>
     <button role="menuitem" data-act="album"${t && t.id && t.album ? "" : " disabled"}>${ICON_ALBUM}<span class="t">Go to album</span></button>
     <button role="menuitem" data-act="find"${off}>${ICON_LIST}<span class="t">Find in playlists</span></button>
     ${t ? "" : '<div class="cap">Play a song to use these.</div>'}`);
@@ -1223,6 +1225,40 @@ async function removeFromPlaylist(t) {
   } catch (e) {
     if (e.status === 401) onApiError(e); else toast(`Couldn't remove it: ${e.message}`);
   } finally { removing.delete(key); }
+}
+async function addMenu() {
+  const t = mt;
+  if (!t || !t.id) return;
+  const head = `<button role="menuitem" data-act="back">${ICON_BACK}<span class="t">Back</span></button><hr>`;
+  showMenu(head + '<div class="cap">Looking…</div>');
+  menu.querySelector("button")?.focus();
+  let has = new Set();
+  try { has = new Set((await api(`/api/where/${encodeURIComponent(t.id)}`)).playlists.map(p => p.id)); } catch { /* the server will say if it is a duplicate */ }
+  if (menu.hidden || mt !== t) return;
+  const lists = S.playlists.filter(p => p.id !== "LM");
+  showMenu(head + `<div class="cap">Add “${esc(t.title)}” to:</div>` + (lists.length ? lists.map(p => has.has(p.id)
+    ? `<button role="menuitem" data-act="addto-no" disabled><span class="t">${esc(p.title)}</span><span class="n">already in</span></button>`
+    : `<button role="menuitem" data-act="addto" data-pl="${esc(p.id)}"><span class="t">${esc(p.title)}</span></button>`).join("") : '<div class="cap">No playlists yet.</div>'));
+  menu.querySelector('[data-act="addto"]')?.focus();
+}
+async function addToPlaylist(t, pid) {
+  closeMenu();
+  const pl = S.playlists.find(p => p.id === pid), name = pl ? pl.title : "the playlist";
+  try {
+    const r = await api("/api/addtoplaylist", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlist: pid, id: t.id, track: { title: t.title, artists: t.artists, album: t.album, albumId: t.albumId, duration: t.duration, art: t.art, type: t.type } }) });
+    S.allTracks = null;
+    if (S.plId === pid && S.sig.startsWith(pid + ":")) {   // that playlist is on screen: add the row
+      S.tracks = [...S.tracks, { ...t, sid: r.sid || null }].map((x, i) => prep(x, i + 1, "", 0, pid));
+      S.sig = pid + ":" + S.tracks.map(x => x.id).join();
+      $("#plmeta").textContent = `${S.tracks.length} songs, checked ${when(Date.now() / 1000)}`;
+      if (S.scope === "one") render();
+    }
+    if (pl && /\d/.test(String(pl.count ?? ""))) { pl.count = String((parseInt(String(pl.count).replace(/\D/g, ""), 10) || 0) + 1); renderPlaylists(); }
+    toast(`Added “${t.title}” to “${name}”`);
+  } catch (e) {
+    if (e.status === 401) onApiError(e); else toast(e.status === 409 ? `“${t.title}” is already in “${name}”` : `Couldn't add it: ${e.message}`);
+  }
 }
 async function findMenu() {
   const t = mt;
@@ -1271,6 +1307,8 @@ menu.addEventListener("click", e => {
   const act = b.dataset.act, t = mt;
   if (act === "like") { closeMenu(); toggleLike(t); }
   else if (act === "album") goToAlbum(t);
+  else if (act === "addpl") addMenu();
+  else if (act === "addto") addToPlaylist(t, b.dataset.pl);
   else if (act === "find") findMenu();
   else if (act === "back") mainMenu(t, mAnchor);
   else if (act === "remove") confirmRemove();

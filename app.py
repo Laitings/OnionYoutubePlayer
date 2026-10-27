@@ -558,6 +558,54 @@ def remove(body: RemoveBody):
     return {"ok": True}
 
 
+class AddBody(BaseModel):
+    playlist: str
+    id: str
+    track: dict | None = None   # what the page knows about the song, for the saved copy
+
+
+@app.post("/api/addtoplaylist")
+def add_to_playlist(body: AddBody):
+    """Adds a song to the end of one of your playlists, in YouTube Music too."""
+    pid, vid = safe_id(body.playlist), safe_id(body.id)
+    if pid == "LM" or is_album(pid):
+        raise HTTPException(400, "Songs can't be added to that.")
+    cached = read_cache(pid)
+    if cached and any(t.get("id") == vid for t in cached.get("tracks") or []):
+        raise HTTPException(409, "That song is already in the playlist.")
+    try:
+        with _yt_lock:
+            result = get_yt().add_playlist_items(pid, [vid], duplicates=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"add to playlist failed ({pid}, {vid}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not (isinstance(result, dict) and "SUCCEEDED" in str(result.get("status", "")).upper()):
+        print(f"add to playlist refused ({pid}, {vid}): {str(result)[:300]}")
+        raise HTTPException(502, "YouTube Music did not add it. It may already be in the playlist, or the playlist isn't yours.")
+    sid = next((r.get("setVideoId") for r in result.get("playlistEditResults") or [] if r), None)
+    if cached:
+        t = body.track or {}
+        cached.setdefault("tracks", []).append({
+            "id": vid,
+            "title": str(t.get("title") or ""),
+            "artists": str(t.get("artists") or ""),
+            "album": str(t.get("album") or ""),
+            "albumId": t.get("albumId") if isinstance(t.get("albumId"), str) else None,
+            "duration": t.get("duration") if isinstance(t.get("duration"), (int, float)) else 0,
+            "art": t.get("art") if isinstance(t.get("art"), str) else None,
+            "ok": True,
+            "type": t.get("type") if isinstance(t.get("type"), str) else None,
+            "sid": sid,
+        })
+        if isinstance(cached.get("count"), int):
+            cached["count"] += 1
+        write_cache(pid, cached)
+    print(f"added {vid} to {pid}")
+    return {"ok": True, "sid": sid}
+
+
 _where_cache: dict[str, tuple[float, str, dict]] = {}   # playlist id -> (file time, title, {song id: first position})
 
 
