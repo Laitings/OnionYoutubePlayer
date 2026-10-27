@@ -593,9 +593,31 @@ async function backgroundSync(synced) {
   } finally { bgRunning = false; $("#bgstatus").textContent = ""; }
 }
 
+/* ---------- back button: every page you open is a history entry, so Back (mouse button, Alt+Left, swipe) returns to the previous page ---------- */
+let navRestoring = false;
+function pushNav(id) {
+  if (navRestoring || !id) return;
+  const cur = history.state && history.state.id;
+  if (cur === id) return;   // refreshing the page that is already showing
+  if (cur) history.pushState({ id }, ""); else history.replaceState({ id }, "");   // the first page replaces the empty entry
+}
+addEventListener("popstate", e => {
+  const id = e.state && e.state.id;
+  if (!id) return;
+  closeMenu();
+  navRestoring = true;
+  try {
+    S.scope = "one"; syncScopeButtons();
+    S.q = ""; $("#q").value = "";
+    if (id === "search") { if (S.results) showSearch(); }
+    else { S.sig = ""; openPlaylist(id); }
+  } finally { navRestoring = false; }
+});
+
 const isPage = id => /^(MPRE|UC|MPLA)/.test(id);   // album and artist pages, which have a header and are not in the playlist list
 async function openPlaylist(id, full = false) {
   S.plId = id; store.set("last", id);
+  pushNav(id);
   if (!isPage(id)) showHero(null);
   renderPlaylists();
   $("#side").classList.remove("open");
@@ -726,6 +748,7 @@ function showSearch() {
   if (!r) return;
   S.seq++;
   S.plId = "search";
+  pushNav("search");
   showHero(null);
   $("#shelves").innerHTML = shelfSec("Artists", r.artists, true, () => "Artist")
     + shelfSec("Albums", r.albums, false, x => [x.artists, x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "));
