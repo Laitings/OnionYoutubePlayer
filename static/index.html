@@ -1037,6 +1037,15 @@ function startQueue(list, t) {
   buildOrder(idx);
   playPos(S.order.indexOf(idx));
 }
+/* Slot a song in right after the current one, whatever the shuffle order is. A copy, so a song queued twice stays two entries. */
+function playNext(t) {
+  if (!t || !t.ok) return;
+  if (!S.cur) { startQueue([t], t); return; }
+  S.queue.push({ ...t });
+  S.order.splice(S.pos + 1, 0, S.queue.length - 1);
+  preloadNext(0);
+  toast(`“${t.title}” will play next`);
+}
 function playPos(pos) {
   if (pos < 0 || pos >= S.order.length) return;
   S.pos = pos;
@@ -1366,7 +1375,8 @@ const ICON_STAR = '<svg class="ico-star" viewBox="0 0 24 24"><path d="M12 17.27 
 const ICON_LIST = '<svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>';
 const ICON_ALBUM = '<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"/></svg>';
 const ICON_ADD = '<svg viewBox="0 0 24 24"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
-const ICON_PERSON = '<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
+const ICON_NEXT = '<svg viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0 8h7v2H3zm13-1v8l6-4z"/></svg>';
+const ICON_PERSON ='<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
 const ICON_BACK = '<svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>';
 const ICON_REMOVE = '<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
 function closeMenu() {
@@ -1396,6 +1406,7 @@ function mainMenu(track = S.cur, anchor = dots) {
   const canRemove = anchor !== dots && t && t.pid && !inLM && S.playlists.some(p => p.id === t.pid);
   showMenu(`
     ${canRemove ? `<button role="menuitem" data-act="remove" class="danger">${ICON_REMOVE}<span class="t">Remove from playlist</span></button>` : ""}
+    <button role="menuitem" data-act="playnext"${t && t.ok ? "" : " disabled"}>${ICON_NEXT}<span class="t">Play next</span></button>
     <button role="menuitem" data-act="like" class="${on ? "on" : ""}"${off}>${ICON_STAR}<span class="t">${on ? "Remove from liked songs" : "Add to liked songs"}</span></button>
     <button role="menuitem" data-act="addpl"${off}>${ICON_ADD}<span class="t">Add to playlist</span></button>
     <button role="menuitem" data-act="artist"${off}>${ICON_PERSON}<span class="t">Go to artist</span></button>
@@ -1556,6 +1567,7 @@ menu.addEventListener("click", e => {
   if (!b || b.disabled || !mt) return;
   const act = b.dataset.act, t = mt;
   if (act === "like") { closeMenu(); toggleLike(t); }
+  else if (act === "playnext") { closeMenu(); playNext(t); }
   else if (act === "album") goToAlbum(t);
   else if (act === "artist") artistMenu();
   else if (act === "goartist") openPage(b.dataset.id);
