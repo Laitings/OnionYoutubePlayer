@@ -1439,7 +1439,7 @@ async def audio(video_id: str, request: Request):
 
 _mini = {"state": {}, "cmds": [], "seen": -1e9, "close": False}
 MINI_FILE = BASE / "mini-window.json"
-MINI_COMMANDS = {"play", "prev", "next", "mute", "seek"}
+MINI_COMMANDS = {"play", "prev", "next", "mute", "seek", "volume"}
 
 
 def find_browser() -> str | None:
@@ -1488,7 +1488,7 @@ async def mini_push(request: Request):
     """The main page says what is playing."""
     body = await request.json()
     if isinstance(body, dict):
-        _mini["state"] = {k: body[k] for k in ("title", "artist", "art", "playing", "muted", "pos", "dur", "at") if k in body}
+        _mini["state"] = {k: body[k] for k in ("title", "artist", "art", "playing", "muted", "vol", "pos", "dur", "at") if k in body}
     return {"open": mini_alive()}
 
 

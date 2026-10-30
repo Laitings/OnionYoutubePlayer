@@ -926,6 +926,7 @@ function setVolume() {
   both(el => { el.volume = (vol.value / 100) ** 2; });
   paint(vol);
   store.set("vol", +vol.value);
+  miniSync();
 }
 vol.addEventListener("input", () => { if (muted) setMuted(false); setVolume(); });
 
@@ -1749,7 +1750,7 @@ const mini = { open: false, pushedAt: 0, launched: 0, pumping: false };
 function miniState() {
   const t = S.cur;
   return { title: t ? t.title : "Nothing playing", artist: t ? t.artists : "", art: t && t.art ? artUrl(t.art, 160) : "/logo.svg",
-    playing: !audio.paused, muted, pos: audio.currentTime || 0, dur: dur(), at: Date.now() };
+    playing: !audio.paused, muted, vol: +vol.value, pos: audio.currentTime || 0, dur: dur(), at: Date.now() };
 }
 function miniSync() {
   if (!mini.open) return;
@@ -1762,6 +1763,7 @@ function runMiniCmd(c) {
   else if (c.cmd === "prev") prev();
   else if (c.cmd === "next") next();
   else if (c.cmd === "mute") setMuted(!muted);
+  else if (c.cmd === "volume" && typeof c.value === "number") { vol.value = Math.max(0, Math.min(100, c.value)); if (muted && c.value > 0) setMuted(false); setVolume(); }
   else if (c.cmd === "seek" && typeof c.value === "number") audio.currentTime = c.value / 1000 * dur();
 }
 async function miniPump() {

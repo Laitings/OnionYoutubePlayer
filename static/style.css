@@ -357,3 +357,5 @@ body.mini { margin: 0; padding: 10px 12px; height: 100vh; align-content: center;
 .mini .m-ctl { display: flex; align-items: center; gap: 4px; }
 .mini .ib { width: 34px; height: 34px; }
 .mini #m-seek { grid-column: 1 / -1; }
+
+.mini #m-vol { flex: 1 1 70px; min-width: 50px; margin-left: 6px; }
