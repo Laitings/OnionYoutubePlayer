@@ -8,3 +8,5 @@ config.json
 onion.log
 window.json
 browser-profile/
+
+backups/

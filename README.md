@@ -35,6 +35,29 @@ The first time, the page asks you to connect YouTube Music. Follow the four step
 - **Search YouTube Music:** the **Search** tab in the sidebar searches all of YouTube Music, not just your library. Type and press Enter: artists and albums (incl. EPs and singles) show as cards, songs as a normal list you can play, like and add to playlists. Click an artist or album card to open it, and use *Back to results* in the Search tab to return. Your last 12 searches are kept in the tab.
 - Search, sort and the queue all run in the page, on the list you're looking at. Click a song and the queue is whatever is on screen at that moment, filtered and sorted.
 
+## Library tools and recovery
+
+- **Automatic snapshots:** before adding/removing songs, renaming, replacing a song or deleting a playlist, Onion first fetches the playlist and saves the returned entries in `backups/`. If fetching or saving fails, that edit is blocked. Snapshots contain song metadata and entry order, never your login. They are excluded from Git and are not automatically deleted.
+- **Backups & recovery** in the sidebar lets you save a snapshot manually, download its JSON, or recover a snapshot as a **new private playlist**. This is a recovery copy, not an in-place undo: the original playlist and its URL are not overwritten. Duplicate entries and order are preserved where YouTube permits them. Entries without video ids cannot be recreated, and unavailable videos may be rejected by YouTube. Keep downloaded copies somewhere separate from this folder.
+- **Delete still requires typing `yes`**, and the server checks the confirmation too. If YouTube reports more entries than it returns for the snapshot, deletion is blocked. The backup screen shows both counts. For example, a playlist might report 861 entries but return only 860: the snapshot then contains those 860, not the missing entry.
+- **Large selections:** additions and removals run in batches of 100 without silently truncating the selection. Only batches YouTube confirms are reflected in the cache and UI. A failure reports the confirmed count and the unconfirmed remainder; sync before retrying an uncertain operation. Each operation saves one snapshot before its first batch.
+- **Whole queue:** all upcoming songs are saved locally. The queue initially draws 200 songs; **Show next** reveals additional portions without changing playback order. Saving a queue as a playlist also handles lists larger than 1,000 songs and reports partial failures.
+- **Compare duplicates:** choose which copy to keep, and use **Listen** to compare versions without replacing the queue. Bulk cleanup only includes identical video ids. Alternate versions require individual review and confirmation. The normal player pauses during a preview and resumes when you close the comparison if it was playing before.
+- **Find replacements** lists unavailable entries. Search, listen and choose an alternative, then confirm. Where YouTube exposes the original entry id and video id, the alternative is added and moved to that position before the old entry is removed. If a step fails, the original is kept where possible and the backup remains available. If the old entry cannot be removed safely, Onion offers to add the alternative at the end instead, leaving the old entry for manual cleanup in YouTube Music.
+- **Shuffle options:** Balanced spreads artists apart where possible; Discovery also favors songs outside Recently played, then older plays; Fully random keeps ordinary shuffle. Listening history covers the last 100 distinct songs in this browser profile, not your entire YouTube history.
+- **Save search / Smart playlists:** save local rules for search words, artist, source playlist, liked songs, maximum length and exclusion of recently played songs. Views are evaluated against synced playlists when opened. Genre terms can match playlist names but are not inferred from the music. Creating, editing or removing a smart view does not change YouTube playlists.
+- **Organize** on a playlist lets you pin it or assign a local folder. Folders, pins, smart views, queue and recent plays belong to the browser profile on this computer. They do not sync to YouTube or between browsers.
+- Small windows have a **More** button in the player to reveal queue, lyrics, timer, shuffle, repeat and volume. Opening another playlist or album clears the old song-search filter.
+
+## Development checks
+
+The regression tests use temporary directories and a fake YouTube client. They do not edit a real account:
+
+```powershell
+.venv\Scripts\python -m unittest test_playlist_safety -v
+node test_player_tools.cjs
+```
+
 ## Keys
 
 Space play/pause, N next, P previous, S shuffle, R repeat, L like/unlike the playing song, / jump to search, Esc clear search, left/right arrows seek 5 seconds. Your keyboard's media keys work too.

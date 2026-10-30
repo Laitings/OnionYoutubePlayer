@@ -5,6 +5,9 @@ and this server hands that audio to the browser. It only listens on
 127.0.0.1, because it uses your YouTube login.
 """
 import json
+import functools
+import uuid
+from playlist_backups import BackupStore, batches
 import mimetypes
 import os
 import queue
@@ -49,6 +52,29 @@ PORT = int(os.environ.get("ONION_PORT", "8765"))
 
 app = FastAPI(title="Onion Player")
 
+
+# All playlist edits and syncs share a lock, so a stale background sync cannot
+# overwrite an edit's cache. Snapshots are completed before contacting YouTube to edit.
+_edit_lock = threading.RLock()
+backups = BackupStore(BASE / "backups")
+
+def serialized_edit(fn):
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with _edit_lock:
+            return fn(*args, **kwargs)
+    return run
+
+def snapshot(pid, reason):
+    try:
+        data = fetch_playlist(pid, None)
+        saved = backups.save(data, reason)
+        write_cache(pid, data)
+        return saved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, "Nothing was changed: could not save a complete playlist backup. " + str(exc)[:180])
 
 # ---------------------------------------------------------------- helpers
 
@@ -138,7 +164,7 @@ def read_cache(name: str):
 
 
 def write_cache(name: str, data) -> None:
-    tmp = cache_path(name).with_suffix(".tmp")
+    tmp = cache_path(name).with_suffix("." + uuid.uuid4().hex + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
     tmp.replace(cache_path(name))
 
@@ -296,6 +322,8 @@ def fetch_playlist(pid: str, cached: dict | None = None) -> dict:
         "fetched": now,
         "checked": now,
         "count": data.get("trackCount"),
+        "description": data.get("description") or "",
+        "privacy": data.get("privacy") or "PRIVATE",
         "tracks": [simplify(t) for t in data.get("tracks") or []],
     }
 
@@ -368,6 +396,7 @@ def synced_times(items: list[dict]) -> dict:
 
 
 @app.get("/api/playlists")
+@serialized_edit
 def playlists(refresh: int = 0):
     if not refresh:
         cached = read_cache("_playlists")
@@ -384,6 +413,7 @@ def playlists(refresh: int = 0):
 
 
 @app.get("/api/playlist/{pid}")
+@serialized_edit
 def playlist(pid: str, refresh: int = 0, full: int = 0):
     """No flags: the saved copy if there is one. refresh=1: check for changes (one request when
     nothing changed). full=1 as well: download everything again."""
@@ -745,11 +775,13 @@ class RemoveBody(BaseModel):
 
 
 @app.post("/api/remove")
+@serialized_edit
 def remove(body: RemoveBody):
     """Removes one song from one of your playlists, in YouTube Music too."""
     pid = safe_id(body.playlist)
     if pid == "LM":
         raise HTTPException(400, "Liked songs are changed with the star, not removed like this.")
+    snapshot(pid, "Remove song")
     vid, sid = body.id, body.sid
     if not vid or not sid:
         # The saved copy is older than this feature and has no entry ids: download the playlist again to get them.
@@ -823,11 +855,13 @@ class AddBody(BaseModel):
 
 
 @app.post("/api/addtoplaylist")
+@serialized_edit
 def add_to_playlist(body: AddBody):
     """Adds a song to the end of one of your playlists, in YouTube Music too."""
     pid, vid = safe_id(body.playlist), safe_id(body.id)
     if pid == "LM" or is_album(pid):
         raise HTTPException(400, "Songs can't be added to that.")
+    snapshot(pid, "Add song")
     cached = read_cache(pid)
     if cached and any(t.get("id") == vid for t in cached.get("tracks") or []):
         raise HTTPException(409, "That song is already in the playlist.")
@@ -877,42 +911,39 @@ class AddManyBody(BaseModel):
 
 
 @app.post("/api/addmany")
+@serialized_edit
 def add_many(body: AddManyBody):
     """Adds several songs to the end of one of your playlists. Songs already in it are skipped."""
     pid = own_playlist(body.playlist)
-    cached = read_cache(pid)
-    have = {t.get("id") for t in (cached or {}).get("tracks") or []}
-    picked: dict[str, dict] = {}
-    for t in body.tracks[:500]:
+    saved = snapshot(pid, "Add songs")
+    cached = saved["playlist"]
+    have = {t.get("id") for t in cached["tracks"]}
+    picked = {}
+    for t in body.tracks:
         vid = t.get("id")
-        if isinstance(vid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", vid) and vid not in have and vid not in picked:
-            picked[vid] = t
-    if not picked:
-        return {"added": 0, "skipped": len(body.tracks), "sids": {}}
-    ids = list(picked)
-    try:
-        with _yt_lock:
-            result = get_yt().add_playlist_items(pid, ids, duplicates=False)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"add many failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
-        raise api_error(exc)
-    if not (isinstance(result, dict) and succeeded(result)):
-        print(f"add many refused ({pid}): {str(result)[:300]}")
-        raise HTTPException(502, "YouTube Music did not add them. The playlist may not be yours.")
-    sids: dict[str, str | None] = {}
-    for i, r in enumerate(result.get("playlistEditResults") or []):
-        if isinstance(r, dict):
-            sids[r.get("videoId") or (ids[i] if i < len(ids) else "")] = r.get("setVideoId")
-    if cached:
-        for vid, t in picked.items():
-            cached.setdefault("tracks", []).append(track_entry(vid, t, sids.get(vid)))
-        if isinstance(cached.get("count"), int):
-            cached["count"] += len(picked)
-        write_cache(pid, cached)
-    print(f"added {len(picked)} songs to {pid}")
-    return {"added": len(picked), "skipped": len(body.tracks) - len(picked), "sids": sids}
+        if isinstance(vid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", vid) and vid not in have:
+            picked.setdefault(vid, t)
+    added, sids, error = [], {}, None
+    for ids in batches(list(picked)):
+        try:
+            with _yt_lock:
+                result = get_yt().add_playlist_items(pid, ids, duplicates=False)
+            if not isinstance(result, dict) or not succeeded(result):
+                raise RuntimeError("YouTube Music did not confirm this batch. Sync before trying again.")
+            results = result.get("playlistEditResults") or []
+            for i, vid in enumerate(ids):
+                r = results[i] if i < len(results) else {}
+                sids[vid] = r.get("setVideoId") if isinstance(r, dict) else None
+                cached["tracks"].append(track_entry(vid, picked[vid], sids[vid]))
+            added.extend(ids)
+            cached["count"] = len(cached["tracks"])
+            write_cache(pid, cached)
+        except Exception as exc:
+            error = str(exc)[:250]
+            break
+    return {"added": len(added), "addedIds": added, "sids": sids,
+            "skipped": len(body.tracks) - len(picked), "failed": len(picked) - len(added),
+            "error": error, "backup": saved["key"]}
 
 
 class RemoveManyBody(BaseModel):
@@ -921,53 +952,43 @@ class RemoveManyBody(BaseModel):
 
 
 @app.post("/api/removemany")
+@serialized_edit
 def remove_many(body: RemoveManyBody):
     """Removes several songs from one of your playlists, in YouTube Music too."""
     pid = own_playlist(body.playlist)
-    items = [i for i in body.items[:500] if isinstance(i, dict) and isinstance(i.get("id"), str)]
-    if any(not i.get("sid") for i in items):
-        # saved before entry ids were remembered: download the playlist again to get them
+    saved = snapshot(pid, "Remove songs")
+    data = saved["playlist"]
+    tracks, used, send = data["tracks"], set(), []
+    for item in body.items:
+        sid, vid, pos = item.get("sid"), item.get("id"), item.get("pos")
+        # An explicit entry id must still match. Never fall back to another copy.
+        if sid:
+            k = next((n for n, t in enumerate(tracks) if t.get("sid") == sid and (not vid or t.get("id") == vid)), None)
+        elif isinstance(pos, int) and 1 <= pos <= len(tracks) and tracks[pos - 1].get("id") == vid:
+            k = pos - 1
+        else:
+            k = None
+        if k is not None and k not in used and tracks[k].get("sid") and tracks[k].get("id"):
+            used.add(k)
+            send.append({"videoId": tracks[k]["id"], "setVideoId": tracks[k]["sid"], "pos": pos})
+    removed, error = [], None
+    for batch in batches(send):
         try:
-            data = fetch_playlist(pid, None)
-        except HTTPException:
-            raise
+            with _yt_lock:
+                result = get_yt().remove_playlist_items(pid, [{"videoId": t["videoId"], "setVideoId": t["setVideoId"]} for t in batch])
+            if not succeeded(result):
+                raise RuntimeError("YouTube Music did not confirm this batch. Sync before trying again.")
+            removed.extend(batch)
+            gone = {t["setVideoId"] for t in batch}
+            data["tracks"] = [t for t in data["tracks"] if t.get("sid") not in gone]
+            data["count"] = len(data["tracks"])
+            write_cache(pid, data)
         except Exception as exc:
-            raise api_error(exc)
-        write_cache(pid, data)
-        tracks, used = data["tracks"], set()
-        for i in items:
-            if i.get("sid"):
-                continue
-            pos = i.get("pos")
-            k = pos - 1 if isinstance(pos, int) and 1 <= pos <= len(tracks) and tracks[pos - 1].get("id") == i["id"] and pos - 1 not in used \
-                else next((n for n, t in enumerate(tracks) if t.get("id") == i["id"] and n not in used), None)
-            if k is not None:
-                used.add(k)
-                i["sid"] = tracks[k].get("sid")
-    send = [{"videoId": i["id"], "setVideoId": i["sid"]} for i in items if i.get("sid")]
-    if not send:
-        raise HTTPException(400, "YouTube Music doesn't allow removing these from here. Remove them in YouTube Music.")
-    try:
-        with _yt_lock:
-            result = get_yt().remove_playlist_items(pid, send)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"remove many failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
-        raise api_error(exc)
-    if not succeeded(result):
-        print(f"remove many refused ({pid}): {str(result)[:300]}")
-        raise HTTPException(502, "YouTube Music did not remove them: " + str(result)[:200])
-    gone = {x["setVideoId"] for x in send}
-    data = read_cache(pid)
-    if data:
-        before = len(data.get("tracks") or [])
-        data["tracks"] = [t for t in data.get("tracks") or [] if t.get("sid") not in gone]
-        if isinstance(data.get("count"), int):
-            data["count"] = max(0, data["count"] - (before - len(data["tracks"])))
-        write_cache(pid, data)
-    print(f"removed {len(send)} songs from {pid}")
-    return {"removed": len(send), "skipped": len(items) - len(send)}
+            error = str(exc)[:250]
+            break
+    return {"removed": len(removed), "removedItems": removed,
+            "skipped": len(body.items) - len(send), "failed": len(send) - len(removed),
+            "error": error, "backup": saved["key"]}
 
 
 # ---------------------------------------------------------------- your own playlists: create, rename, delete
@@ -978,14 +999,15 @@ class CreateBody(BaseModel):
 
 
 @app.post("/api/playlist/create")
+@serialized_edit
 def create_playlist(body: CreateBody):
     title = body.title.strip()[:150]
     if not title:
         raise HTTPException(400, "Give the playlist a name.")
-    ids = list(dict.fromkeys(i for i in body.ids[:1000] if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", i or "")))
+    ids = [i for i in body.ids if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", i or "")]
     try:
         with _yt_lock:
-            result = get_yt().create_playlist(title, "", video_ids=ids or None)
+            result = get_yt().create_playlist(title, "", privacy_status="PRIVATE", video_ids=ids[:100] or None)
     except HTTPException:
         raise
     except Exception as exc:
@@ -994,7 +1016,19 @@ def create_playlist(body: CreateBody):
     if not isinstance(result, str) or not re.fullmatch(r"[A-Za-z0-9_-]{5,80}", result):
         print(f"create playlist refused: {str(result)[:300]}")
         raise HTTPException(502, "YouTube Music did not create the playlist: " + str(result)[:200])
-    entry = {"id": result, "title": title, "count": str(len(ids))}
+    confirmed = min(100, len(ids))
+    warning = None
+    for batch in batches(ids[100:]):
+        try:
+            with _yt_lock:
+                added = get_yt().add_playlist_items(result, batch, duplicates=True)
+            if not succeeded(added):
+                raise RuntimeError("YouTube did not confirm the next batch")
+            confirmed += len(batch)
+        except Exception as exc:
+            warning = f"Created with {confirmed} of {len(ids)} songs. Sync before retrying: {str(exc)[:150]}"
+            break
+    entry = {"id": result, "title": title, "count": str(confirmed), "warning": warning}
     edit_listing(lambda items: items.insert(min(1, len(items)), entry))
     print(f"created playlist {result} with {len(ids)} songs")
     return entry
@@ -1006,10 +1040,12 @@ class RenameBody(BaseModel):
 
 
 @app.post("/api/playlist/rename")
+@serialized_edit
 def rename_playlist(body: RenameBody):
     pid, title = own_playlist(body.playlist), body.title.strip()[:150]
     if not title:
         raise HTTPException(400, "Give the playlist a name.")
+    snapshot(pid, "Rename playlist")
     try:
         with _yt_lock:
             result = get_yt().edit_playlist(pid, title=title)
@@ -1034,11 +1070,20 @@ def rename_playlist(body: RenameBody):
 
 class DeleteBody(BaseModel):
     playlist: str
+    confirmation: str = ""
 
 
 @app.post("/api/playlist/delete")
+@serialized_edit
 def delete_playlist(body: DeleteBody):
+    if body.confirmation.strip().lower() != "yes":
+        raise HTTPException(400, "Type yes to confirm playlist deletion.")
     pid = own_playlist(body.playlist)
+    saved = snapshot(pid, "Delete playlist")
+    reported = saved["playlist"].get("count")
+    captured = len(saved["playlist"]["tracks"])
+    if isinstance(reported, int) and reported > captured:
+        raise HTTPException(409, f"Nothing was deleted. YouTube reports {reported} entries but returned only {captured} for the backup. The snapshot is saved; use YouTube Music to check the missing entries first.")
     try:
         with _yt_lock:
             result = get_yt().delete_playlist(pid)
@@ -1054,6 +1099,80 @@ def delete_playlist(body: DeleteBody):
     print(f"deleted playlist {pid}")
     return {"ok": True}
 
+
+# ---------------------------------------------------------------- backups and replacement songs
+
+@app.get("/api/backups")
+def list_backups():
+    return {"backups": backups.listing()}
+
+@app.get("/api/backups/{key}")
+def export_backup(key: str):
+    from fastapi.responses import JSONResponse
+    try:
+        data = backups.read(key)
+    except (ValueError, OSError):
+        raise HTTPException(404, "Backup not found")
+    return JSONResponse(data, headers={"Content-Disposition": f'attachment; filename="onion-backup-{key}.json"'})
+
+class BackupBody(BaseModel):
+    playlist: str
+
+@app.post("/api/backup")
+@serialized_edit
+def manual_backup(body: BackupBody):
+    data = snapshot(own_playlist(body.playlist), "Manual backup")
+    return {"key": data["key"], "count": len(data["playlist"]["tracks"])}
+
+class RestoreBody(BaseModel):
+    key: str
+
+@app.post("/api/restore")
+@serialized_edit
+def restore_backup(body: RestoreBody):
+    try:
+        data = backups.read(body.key)["playlist"]
+    except (ValueError, OSError):
+        raise HTTPException(404, "Backup not found")
+    ids = [t["id"] for t in data["tracks"] if t.get("id")]
+    result = create_playlist(CreateBody(title=data["title"] + " (recovered)", ids=ids))
+    result["unavailable"] = len(data["tracks"]) - len(ids)
+    result["notReturned"] = max(0, (data.get("count") or len(data["tracks"])) - len(data["tracks"]))
+    return result
+
+class ReplaceBody(BaseModel):
+    playlist: str
+    sid: str
+    replacement: str
+
+@app.post("/api/replace")
+@serialized_edit
+def replace_song(body: ReplaceBody):
+    pid, vid = own_playlist(body.playlist), safe_id(body.replacement)
+    saved = snapshot(pid, "Replace unavailable song")
+    tracks = saved["playlist"]["tracks"]
+    index = next((i for i, t in enumerate(tracks) if t.get("sid") == body.sid), None)
+    if index is None:
+        raise HTTPException(409, "The original entry changed. Sync the playlist first.")
+    original = tracks[index]
+    if not original.get("id"):
+        raise HTTPException(400, "YouTube does not provide an id to remove this unavailable entry. Add the alternative using Add to playlist, then remove the old entry in YouTube Music.")
+    try:
+        with _yt_lock:
+            yt = get_yt()
+            result = yt.add_playlist_items(pid, [vid], duplicates=True)
+            entries = result.get("playlistEditResults") or [] if isinstance(result, dict) else []
+            sid = entries[0].get("setVideoId") if entries else None
+            if not succeeded(result) or not sid:
+                raise RuntimeError("Could not confirm the added alternative; original was kept. Sync before trying again.")
+            if not succeeded(yt.edit_playlist(pid, moveItem=(sid, body.sid))):
+                raise RuntimeError("Alternative was added at the end; original was kept because moving failed.")
+            if not succeeded(yt.remove_playlist_items(pid, [{"videoId": original["id"], "setVideoId": body.sid}])):
+                raise RuntimeError("Alternative was added; original was kept because removal failed.")
+        write_cache(pid, fetch_playlist(pid, None))
+    except Exception as exc:
+        raise HTTPException(502, str(exc)[:300] + " A backup is available in Backups & recovery.")
+    return {"ok": True, "backup": saved["key"]}
 
 # ---------------------------------------------------------------- lyrics
 

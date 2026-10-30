@@ -10,7 +10,7 @@ const LIMIT = 2500;   // most rows drawn at once; search narrows it down
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem("onion." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem("onion." + k, JSON.stringify(v)); } catch { /* storage can be blocked */ } },
+  set(k, v) { try { localStorage.setItem("onion." + k, JSON.stringify(v)); return true; } catch { toast("Could not save locally: browser storage is full or blocked. Export important playlists using Backups & recovery."); return false; } },
 };
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = s => {
@@ -154,6 +154,7 @@ function renderPlaylists() {
     const n = String(p.count ?? "").match(/\d[\d.,]*/);
     return `<button class="pl${p.id === S.plId ? " active" : ""}" data-id="${esc(p.id)}"><span class="t">${esc(p.title)}</span><span class="n">${n ? esc(n[0]) : ""}</span></button>`;
   }).join("");
+  paintLibrary(f);
 }
 $("#plfilter").addEventListener("input", renderPlaylists);
 $("#plfilter").addEventListener("keydown", e => {
@@ -238,7 +239,10 @@ addEventListener("popstate", e => {
 
 const isPage = id => /^(MPRE|UC|MPLA)/.test(id);   // album and artist pages, which have a header and are not in the playlist list
 async function openPlaylist(id, full = false) {
+  if (id.startsWith("smart:")) return openSmart(id.slice(6));
   if (id === "recent") return showRecent();
+  S.smart = null;
+  if (id !== S.plId) { S.q = ""; $("#q").value = ""; }
   endSelect();
   S.plId = id; store.set("last", id);
   pushNav(id);
@@ -370,6 +374,7 @@ async function runSearch(q) {
   }
 }
 function showSearch() {
+  S.smart = null;
   const r = S.results;
   if (!r) return;
   S.seq++;
@@ -492,7 +497,8 @@ const SORTS = {
 function render() {
   if (!menu.hidden && mAnchor !== dots) closeMenu();   // the row it belonged to is about to be redrawn
   const terms = fold(S.q.trim()).split(/\s+/).filter(Boolean);
-  const src = S.scope === "all" ? (S.allTracks || []) : S.tracks;
+  let src = S.scope === "all" ? (S.allTracks || []) : S.tracks;
+  if (S.smart) src = src.filter(t => OnionTools.matches(t, S.smart.rules, { fold, liked: S.liked || new Set(), history: store.get("history", []) }));
   const list = (terms.length ? src.filter(t => terms.every(x => t._h.includes(x))) : src.slice()).sort(SORTS[S.sort]);
   S.view = list;
   if (S.sel.size) { const here = new Set(src.map(selKey)); for (const k of S.sel) if (!here.has(k)) S.sel.delete(k); }
@@ -582,6 +588,7 @@ function syncScopeButtons() {
 }
 async function showScope() {
   if (S.scope === "all") {
+    S.smart = null;
     if (!S.allTracks) {
       try {
         const d = await api("/api/cached");
@@ -625,18 +632,14 @@ $("#tracks").addEventListener("keydown", e => {
 });
 
 function buildOrder(startIdx) {
-  const n = S.queue.length;
-  S.order = [...Array(n).keys()];
-  if (!S.shuffle) return;
-  for (let i = n - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [S.order[i], S.order[j]] = [S.order[j], S.order[i]];
-  }
-  if (startIdx >= 0) {
-    const k = S.order.indexOf(startIdx);
-    [S.order[0], S.order[k]] = [S.order[k], S.order[0]];
-  }
+  const indices = S.queue.map((_, i) => i);
+  if (!S.shuffle) { S.order = indices; return; }
+  const rest = indices.filter(i => i !== startIdx);
+  S.order = (startIdx >= 0 ? [startIdx] : []).concat(OnionTools.smartOrder(rest, S.queue, {
+    mode: store.get("shuffleMode", "balanced"), previous: startIdx >= 0 ? startIdx : null, history: store.get("history", []),
+  }));
 }
+
 function startQueue(list, t) {
   S.queue = list.filter(x => x.ok);
   const idx = S.queue.indexOf(t);
@@ -667,10 +670,10 @@ function saveNow(force) {
   savedAt = Date.now();
   store.set("now", { t: slim(S.cur), at: Math.floor(audio.currentTime) || 0 });
 }
-function saveQueue() { store.set("queue", upNext().slice(0, 300).map(x => slim(x.t))); }
+function saveQueue() { store.set("queue", upNext().map(x => slim(x.t))); }
 function noteHistory(t) {
   const h = store.get("history", []).filter(x => x.id !== t.id);
-  h.unshift(slim(t));
+  h.unshift({ ...slim(t), playedAt: Date.now() });
   store.set("history", h.slice(0, 100));
 }
 function restoreNow() {
@@ -905,6 +908,7 @@ function toggleShuffle() {
     preloadNext(300);   // the next song changed, and the current one is already playing
   }
   showModes();
+  saveQueue();
   if (!queuePanel.hidden) showQueue();
 }
 function cycleRepeat() {
@@ -934,7 +938,7 @@ if ("mediaSession" in navigator) {
   h("seekforward", () => { audio.currentTime += 10; });
 }
 document.addEventListener("keydown", e => {
-  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || $("#dlg").open) return;
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if (e.key === "Escape" && !menu.hidden) { const a = mAnchor; closeMenu(); a.focus(); return; }
   if (e.key === "Escape" && S.selecting && !typing) { endSelect(); return; }
@@ -1065,6 +1069,7 @@ function mainMenu(track = S.cur, anchor = dots) {
   const canRemove = anchor !== dots && t && t.pid && !inLM && S.playlists.some(p => p.id === t.pid);
   showMenu(`
     ${canRemove ? `<button role="menuitem" data-act="remove" class="danger">${ICON_REMOVE}<span class="t">Remove from playlist</span></button>` : ""}
+    ${canRemove && !t.ok ? `<button role="menuitem" data-act="replace"><span class="t">Find replacement…</span></button>` : ""}
     <button role="menuitem" data-act="playnext"${t && t.ok ? "" : " disabled"}>${ICON_NEXT}<span class="t">Play next</span></button>
     <button role="menuitem" data-act="queue"${t && t.ok ? "" : " disabled"}>${ICON_QUEUE}<span class="t">Add to queue</span></button>
     <button role="menuitem" data-act="like" class="${on ? "on" : ""}"${off}>${ICON_STAR}<span class="t">${on ? "Remove from liked songs" : "Add to liked songs"}</span></button>
@@ -1100,6 +1105,7 @@ async function removeFromPlaylist(t) {
       if (meta && /\d/.test(String(meta.count ?? ""))) { meta.count = String(S.tracks.length); renderPlaylists(); }
     }
     render();
+    if (S.smart) await openSmart(S.smart.id);
     toast(`Removed “${t.title}” from the playlist`);
   } catch (e) {
     if (e.status === 401) onApiError(e); else toast(`Couldn't remove it: ${e.message}`);
@@ -1238,6 +1244,7 @@ menu.addEventListener("click", e => {
   else if (act === "addnew") { closeMenu(); newPlaylist([t]); }
   else if (act === "find") findMenu();
   else if (act === "back") mainMenu(t, mAnchor);
+  else if (act === "replace") { closeMenu(); findReplacement(t); }
   else if (act === "remove") confirmRemove();
   else if (act === "remove-yes") { closeMenu(); removeFromPlaylist(t); }
   else if (act === "go") jumpTo(b.dataset.pl, t.id);
@@ -1320,7 +1327,7 @@ async function newPlaylist(songs = [], name = "") {
     S.playlists.splice(Math.min(1, S.playlists.length), 0, r);
     S.allTracks = null;
     renderPlaylists();
-    toast(`Created “${title}”${songs.length ? ` with ${songs.length} ${songs.length === 1 ? "song" : "songs"}` : ""}`);
+    toast(r.warning || `Created “${title}” with ${r.count} songs`);
     return r;
   } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't create it: ${e.message}`); return null; }
 }
@@ -1344,9 +1351,9 @@ $("#plrename").onclick = async () => {
 $("#pldelete").onclick = async () => {
   const p = S.playlists.find(x => x.id === S.plId);
   if (!p) return;
-  if (!await ask({ title: `Delete “${p.title}”?`, message: "It is deleted in YouTube Music too. This can't be undone from here.", ok: "Delete", danger: true, confirmWord: "yes" })) return;
+  if (!await ask({ title: `Delete “${p.title}”?`, message: "It is deleted in YouTube Music too. A backup will be saved first. You can recover it as a new private playlist in Backups & recovery.", ok: "Delete", danger: true, confirmWord: "yes" })) return;
   try {
-    await post("/api/playlist/delete", { playlist: p.id });
+    await post("/api/playlist/delete", { playlist: p.id, confirmation: "yes" });
     S.playlists = S.playlists.filter(x => x.id !== p.id); S.allTracks = null; S.sig = "";
     toast(`Deleted “${p.title}”`);
     openPlaylist("LM");
@@ -1379,6 +1386,7 @@ function updateHeadActions() {
   if (owned) { const { exact, maybe } = dupsOf(S.tracks); n = [...exact, ...maybe].reduce((a, g) => a + g.length - 1, 0); }
   $("#pldups").hidden = !n;
   $("#pldups").textContent = `Duplicates (${n})`;
+  updateFeatureActions();
 }
 
 /* ---------- duplicates ---------- */
@@ -1394,43 +1402,22 @@ function applyRemoved(pid, list) {
   if (meta && /\d/.test(String(meta.count ?? ""))) { meta.count = String(Math.max(0, (parseInt(String(meta.count).replace(/\D/g, ""), 10) || 0) - list.length)); renderPlaylists(); }
   render();
 }
+let bulkBusy = false;
 async function removeTracks(pid, list) {
+  if (bulkBusy) return 0;
+  bulkBusy = true;
   try {
+    toast(`Backing up and removing ${list.length} songs…`);
     const r = await post("/api/removemany", { playlist: pid, items: list.map(t => ({ id: t.id, sid: t.sid || null, pos: t.n })) });
-    applyRemoved(pid, list);
+    const confirmed = list.filter(t => r.removedItems.some(x => t.sid ? x.setVideoId === t.sid : x.pos === t.n && x.videoId === t.id));
+    applyRemoved(pid, confirmed);
+    if (r.error || r.skipped || r.failed) await ask({ title: "Removal result", message: `${r.removed} removed, ${r.skipped} skipped, ${r.failed} not confirmed. ${r.error || "Some entries could not be matched safely."} A backup is available in Backups & recovery.`, ok: "OK" });
     return r.removed;
-  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't remove: ${e.message}`); return 0; }
+  } catch (e) { onApiError(e); return 0; }
+  finally { bulkBusy = false; }
 }
-async function showDups() {
-  const pid = S.plId;
-  const paint = body => {
-    const { exact, maybe } = dupsOf(S.tracks);
-    if (!exact.length && !maybe.length) { $("#dlg").close(); return; }
-    const copy = (t, keep) => `<div class="dcopy"><span class="dpos">#${t.n}</span><span class="dtxt">${esc(t.album || "No album")}${t.duration ? " · " + fmt(t.duration) : ""}</span>${keep ? '<span class="dkeep">keep</span>' : `<button type="button" class="ghost dx" data-k="${esc(selKey(t))}">Remove</button>`}</div>`;
-    const grp = g => `<div class="dgroup"><div class="dname">${esc(g[0].title)} <span class="dby">${esc(g[0].artists)}</span></div>${g.map((t, i) => copy(t, i === 0)).join("")}</div>`;
-    body.innerHTML = (exact.length ? `<div class="dcap">The same song more than once</div>${exact.map(grp).join("")}` : "")
-      + (maybe.length ? `<div class="dcap">Might be the same song (another version)</div>${maybe.map(grp).join("")}` : "");
-    const n = exact.reduce((a, g) => a + g.length - 1, 0), okb = $("#dlgok");
-    okb.hidden = !n;
-    okb.textContent = `Remove ${n} extra ${n === 1 ? "copy" : "copies"} of the same song`;
-  };
-  const go = await ask({ title: "Duplicates", message: "The first copy of each song stays.", ok: "Remove", cancel: "Close", body: " ", onBody: body => {
-    paint(body);
-    body.onclick = async e => {
-      const b = e.target.closest(".dx");
-      if (!b) return;
-      const t = S.tracks.find(x => selKey(x) === b.dataset.k);
-      if (!t) return;
-      b.disabled = true;
-      if (await removeTracks(pid, [t])) paint(body); else b.disabled = false;
-    };
-  } });
-  if (!go) return;
-  const extras = dupsOf(S.tracks).exact.flatMap(g => g.slice(1));
-  const n = extras.length && await removeTracks(pid, extras);
-  if (n) toast(`Removed ${n} extra ${n === 1 ? "copy" : "copies"}`);
-}
-$("#pldups").onclick = showDups;
+
+$("#pldups").onclick = () => showDups();
 
 /* ---------- selecting several songs ---------- */
 const selKey = t => (t.pid || "") + "|" + (t.id || "") + "|" + t.n;
@@ -1472,10 +1459,12 @@ async function addManyTo(list) {
   if (pid === "") { if (await newPlaylist(list)) endSelect(); return; }
   const pl = S.playlists.find(p => p.id === pid);
   try {
+    toast(`Backing up and adding ${list.length} songs…`);
     const r = await post("/api/addmany", { playlist: pid, tracks: list.map(slim) });
     S.allTracks = null;
     if (pl && /\d/.test(String(pl.count ?? ""))) { pl.count = String((parseInt(String(pl.count).replace(/\D/g, ""), 10) || 0) + r.added); renderPlaylists(); }
-    toast(r.added ? `Added ${r.added} ${r.added === 1 ? "song" : "songs"} to “${pl ? pl.title : "the playlist"}”${r.skipped ? `, ${r.skipped} already there` : ""}` : "They are all in that playlist already");
+    if (r.error || r.failed) await ask({ title: "Addition result", message: `${r.added} added, ${r.skipped} skipped, ${r.failed} not confirmed. ${r.error || ""} Sync before retrying.`, ok: "OK" });
+    toast(`${r.added} added to “${pl ? pl.title : "the playlist"}”, ${r.skipped} skipped, ${r.failed || 0} not confirmed`);
     endSelect();
   } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't add them: ${e.message}`); }
 }
@@ -1503,6 +1492,7 @@ $("#selbar").onclick = async e => {
 
 /* ---------- recently played ---------- */
 function showRecent() {
+  S.smart = null;
   S.seq++;
   endSelect();
   S.plId = "recent";
@@ -1637,15 +1627,12 @@ $("#locatebtn").onclick = async () => {
 
 /* ---------- the queue: what plays after the current song ---------- */
 const queuePanel = $("#queuepanel"), queueBtn = $("#queuebtn");
+let queueVisible = 200;
 const ICON_SHUFFLE = '<svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>';
 const upNext = () => S.order.slice(S.pos + 1).map((qi, k) => ({ t: S.queue[qi], at: S.pos + 1 + k }));
 function reshuffle() {
   const rest = S.order.splice(S.pos + 1);   // what is still to come; the song playing and the ones before it stay
-  for (let i = rest.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
-  }
-  S.order.push(...rest);
+  S.order.push(...OnionTools.smartOrder(rest, S.queue, { mode: store.get("shuffleMode", "balanced"), previous: S.order[S.pos], history: store.get("history", []) }));
   preloadNext(0);
   saveQueue();
   showQueue();
@@ -1661,7 +1648,7 @@ function showQueue() {
   const keep = queuePanel.querySelector(".qlist")?.scrollTop || 0;
   const list = upNext(), cur = S.cur;
   const now = cur ? `<div class="cap">Now playing</div><div class="qrow now"><span class="t">${esc(cur.title)}<small>${esc(cur.artists)}</small></span></div>` : "";
-  const rows = list.slice(0, 200).map(({ t, at }) => `<div class="qrow" draggable="true" data-at="${at}">
+  const rows = list.slice(0, queueVisible).map(({ t, at }) => `<div class="qrow" draggable="true" data-at="${at}">
       <button class="qplay" title="Play now. Drag to move"><span class="t">${esc(t.title)}<small>${esc(t.artists)}</small></span></button>
       <button class="ib qtop" title="Move to the top" aria-label="Move to the top"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4zm8 4-7 7h5v5h4v-5h5z"/></svg></button>
       <button class="ib qdel" title="Remove from the queue" aria-label="Remove from the queue"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -1669,10 +1656,11 @@ function showQueue() {
   const acts = (S.shuffle && list.length > 1 ? `<button class="qshuffle" data-a="reshuffle" title="Shuffle the songs that are left">${ICON_SHUFFLE}<span>Reshuffle</span></button>` : "")
     + (cur ? `<button class="qshuffle" data-a="save" title="Save the queue as a playlist">${ICON_ADD}<span>Save</span></button>` : "");
   queuePanel.innerHTML = `<div class="qhead"><span>Queue</span><span class="qacts">${acts}</span></div><div class="qlist">${now}<div class="cap">Up next${list.length ? ` (${list.length})` : ""}</div>`
-    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>') + "</div>";
+    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>') + (list.length > queueVisible ? `<button class="ghost" data-morequeue>Show next ${Math.min(200, list.length - queueVisible)} (${list.length - queueVisible} more)</button>` : "") + "</div>";
   queuePanel.querySelector(".qlist").scrollTop = keep;
 }
 function openQueue() {
+  queueVisible = 200;
   closeMenu(); closeSleep(); closeLyrics();
   showQueue();
   queuePanel.hidden = false;
@@ -1682,6 +1670,7 @@ function closeQueue() { queuePanel.hidden = true; queueBtn.setAttribute("aria-ex
 function toggleQueue() { if (queuePanel.hidden) openQueue(); else closeQueue(); }
 queueBtn.onclick = toggleQueue;
 queuePanel.addEventListener("click", e => {
+  if (e.target.closest("[data-morequeue]")) { queueVisible += 200; showQueue(); return; }
   const a = e.target.closest(".qshuffle");
   if (a) return a.dataset.a === "save" ? saveQueueAsPlaylist() : reshuffle();
   const row = e.target.closest(".qrow[data-at]");
@@ -1736,6 +1725,7 @@ document.addEventListener("pointerdown", e => {
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !queuePanel.hidden) { closeQueue(); queueBtn.focus(); } });
 
 /* ---------- start ---------- */
+function bootPlayer() {
 vol.value = store.get("vol", 80);
 setVolume();
 showModes();
@@ -1747,4 +1737,4 @@ restoreNow();
     if (!st.authenticated) showSetup(); else loadPlaylists();
   } catch (e) { toast("Can't reach the Onion server. Is the console window still open?"); }
 })();
-
+}

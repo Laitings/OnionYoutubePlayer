@@ -310,3 +310,45 @@ dialog#dlg::backdrop { background: rgba(0, 0, 0, .55); }
 .right { gap: 2px; }
 .right .ib { width: 34px; height: 34px; }
 .right #vol { flex: 0 1 90px; min-width: 50px; }
+
+/* Library tools and responsive player controls. */
+.head { flex-wrap: wrap; gap: 8px; }
+.head > div { flex-basis: 220px; }
+.viewtools { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.folder { margin: 8px 0; }
+.folder summary { padding: 8px 12px; color: var(--accent); cursor: pointer; overflow-wrap: anywhere; }
+.folder summary small { color: var(--dim); }
+.folder .pl { padding-left: 22px; }
+.sidecap { padding: 9px 12px; }
+.side-foot { gap: 5px; padding: 8px 14px; }
+.field { display: flex; flex-direction: column; gap: 5px; margin: 12px 0; }
+.field input, .field select { width: 100%; padding: 9px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+.checkfield { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.keepchoice { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.dcopy { flex-wrap: wrap; }
+.dcopy .dtxt { min-width: 120px; white-space: normal; }
+.candidate { border-bottom: 1px solid var(--line); padding: 12px 0; overflow-wrap: anywhere; }
+.candidate > div { color: var(--dim); margin: 4px 0 8px; }
+.candidate a { color: var(--accent); }
+.queue, .lyrics { bottom: calc(var(--player-height, 84px) + 10px); max-height: calc(100dvh - var(--player-height, 84px) - 24px); }
+.queue [data-morequeue] { width: 100%; margin: 8px 0; }
+#morecontrols { display: none; }
+#player { grid-template-columns: minmax(200px, 1fr) minmax(240px, 1.4fr) minmax(300px, 1fr); gap: 12px; }
+@media (max-width: 1000px) {
+  #morecontrols { display: inline-block; }
+  #player { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  #player .right { display: none; }
+  #player.controls-open .right { display: flex; justify-content: center; flex-wrap: wrap; }
+  #locatebtn { display: inline-flex; }
+  .np > div { flex: 1; }
+  .head > div { flex-basis: 160px; }
+}
+@media (max-width: 760px) {
+  .head > div { flex-basis: 60%; }
+  #plname { font-size: 23px; }
+  .viewtools .ghost { padding: 4px 8px; font-size: 12px; }
+  .tools { gap: 6px; }
+  .selecting .row .idx { display: flex; }
+  .selecting .row { grid-template-columns: 20px 36px minmax(0, 1fr) 26px 26px 44px; }
+  .dcopy { gap: 5px; }
+}
