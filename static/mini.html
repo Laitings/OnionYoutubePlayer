@@ -73,7 +73,7 @@ async function poll() {
   try {
     const r = await (await fetch("/api/mini/state")).json();
     fails = 0;
-    if (r.close) { window.close(); return; }
+    if (r.close || r.mainGone) { window.close(); return; }
     st = r.state || {};
     render();
   } catch {

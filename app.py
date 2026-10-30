@@ -1504,7 +1504,9 @@ async def mini_state():
     _mini["seen"] = time.monotonic()
     _mini["ready"] = True
     close, _mini["close"] = _mini["close"], False
-    return {"state": _mini["state"], "close": close}
+    # No main page for a few seconds (a reload is back sooner): the mini window has nothing to steer, so it closes too.
+    main_gone = _seen_ping and not _pages and _empty_since is not None and time.monotonic() - _empty_since > 3
+    return {"state": _mini["state"], "close": close, "mainGone": bool(main_gone)}
 
 
 class MiniCmd(BaseModel):
