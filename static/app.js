@@ -874,6 +874,7 @@ function toggleShuffle() {
     preloadNext(300);   // the next song changed, and the current one is already playing
   }
   showModes();
+  if (!queuePanel.hidden) showQueue();
 }
 function cycleRepeat() {
   S.repeat = { off: "all", all: "one", one: "off" }[S.repeat];
@@ -1257,8 +1258,21 @@ restoreNow();
 
 /* ---------- the queue: what plays after the current song ---------- */
 const queuePanel = $("#queuepanel"), queueBtn = $("#queuebtn");
+const ICON_SHUFFLE = '<svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>';
 const upNext = () => S.order.slice(S.pos + 1).map((qi, k) => ({ t: S.queue[qi], at: S.pos + 1 + k }));
+function reshuffle() {
+  const rest = S.order.splice(S.pos + 1);   // what is still to come; the song playing and the ones before it stay
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  S.order.push(...rest);
+  preloadNext(0);
+  showQueue();
+  toast("Shuffled what's left");
+}
 function showQueue() {
+  const keep = queuePanel.querySelector(".qlist")?.scrollTop || 0;
   const list = upNext(), cur = S.cur;
   const now = cur ? `<div class="cap">Now playing</div><div class="qrow now"><span class="t">${esc(cur.title)}<small>${esc(cur.artists)}</small></span></div>` : "";
   const rows = list.slice(0, 200).map(({ t, at }) => `<div class="qrow" data-at="${at}">
@@ -1266,8 +1280,11 @@ function showQueue() {
       <button class="ib qtop" title="Move to the top" aria-label="Move to the top"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4zm8 4-7 7h5v5h4v-5h5z"/></svg></button>
       <button class="ib qdel" title="Remove from the queue" aria-label="Remove from the queue"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
     </div>`).join("");
-  queuePanel.innerHTML = now + `<div class="cap">Up next${list.length ? ` (${list.length})` : ""}</div>`
-    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>');
+  const reshuffleBtn = S.shuffle && list.length > 1
+    ? `<button class="qshuffle" title="Shuffle the songs that are left">${ICON_SHUFFLE}<span>Reshuffle</span></button>` : "";
+  queuePanel.innerHTML = `<div class="qhead"><span>Queue</span>${reshuffleBtn}</div><div class="qlist">${now}<div class="cap">Up next${list.length ? ` (${list.length})` : ""}</div>`
+    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>') + "</div>";
+  queuePanel.querySelector(".qlist").scrollTop = keep;
 }
 function openQueue() {
   closeMenu();
@@ -1278,6 +1295,7 @@ function openQueue() {
 function closeQueue() { queuePanel.hidden = true; queueBtn.setAttribute("aria-expanded", "false"); }
 queueBtn.onclick = () => { if (queuePanel.hidden) openQueue(); else closeQueue(); };
 queuePanel.addEventListener("click", e => {
+  if (e.target.closest(".qshuffle")) return reshuffle();
   const row = e.target.closest(".qrow[data-at]");
   if (!row) return;
   const at = +row.dataset.at;
