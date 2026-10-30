@@ -261,3 +261,4 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
 .qrow:hover .ib, .qrow .ib:focus-visible { opacity: 1; }
 .qrow .ib svg { width: 18px; height: 18px; }
 .qrow .qplay:hover:not(:disabled), .qrow .qplay:focus-visible { background: none; }
+.qrow[data-at] + .qrow[data-at] { border-top: 1px solid var(--line); border-top-left-radius: 0; border-top-right-radius: 0; }
