@@ -929,6 +929,12 @@ function setVolume() {
   miniSync();
 }
 vol.addEventListener("input", () => { if (muted) setMuted(false); setVolume(); });
+vol.addEventListener("wheel", e => {
+  e.preventDefault();
+  vol.value = Math.max(0, Math.min(100, +vol.value + (e.deltaY < 0 ? 5 : -5)));
+  if (muted) setMuted(false);
+  setVolume();
+}, { passive: false });
 
 /* media keys + keyboard */
 if ("mediaSession" in navigator) {

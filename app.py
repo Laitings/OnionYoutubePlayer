@@ -122,8 +122,39 @@ def get_yt() -> YTMusic:
     if _yt is None:
         if not AUTH_FILE.exists():
             raise HTTPException(401, "Not connected to YouTube Music yet.")
-        _yt = YTMusic(str(AUTH_FILE))
+        yt = YTMusic(str(AUTH_FILE))
+        yt._session.hooks["response"].append(lambda resp, *a, **kw: keep_rotated_cookies(yt, resp))
+        _yt = yt
     return _yt
+
+
+_cookie_lock = threading.Lock()
+
+
+def keep_rotated_cookies(yt: YTMusic, resp) -> None:
+    """YouTube keeps swapping some login cookies for new ones (Set-Cookie on ordinary responses).
+    The pasted headers are only a snapshot, so without this the saved login slowly goes stale and
+    you have to paste it again. Merge what YouTube sends back into browser.json and cookies.auto.txt."""
+    try:
+        fresh = {c.name: c.value for c in resp.cookies if "youtube.com" in (c.domain or "")}
+        if not fresh:
+            return
+        with _cookie_lock:
+            parts = [p.strip() for p in yt.base_headers["cookie"].split(";") if p.strip()]
+            current = {n: v for n, _, v in (p.partition("=") for p in parts)}
+            changed = {n: v for n, v in fresh.items() if n in current and current[n] != v}
+            if not changed:
+                return
+            current.update(changed)
+            cookie = "; ".join(f"{n}={v}" for n, v in current.items())
+            yt.base_headers["cookie"] = cookie
+            data = json.loads(AUTH_FILE.read_text("utf-8"))
+            key = next(k for k in data if k.lower() == "cookie")
+            data[key] = cookie
+            AUTH_FILE.write_text(json.dumps(data, indent=4), "utf-8")
+            write_auto_cookies(cookie)
+    except Exception as exc:
+        print("Could not save refreshed cookies:", exc)
 
 
 def artist_list(artists) -> list[dict]:
