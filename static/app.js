@@ -1282,28 +1282,31 @@ addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/closing?p=
 
 /* ---------- small dialogs: a name, a choice, a confirmation ---------- */
 const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-function ask({ title, message = "", input = null, choices = null, ok = "OK", cancel = "Cancel", danger = false, body = null, onBody = null }) {
+function ask({ title, message = "", input = null, choices = null, ok = "OK", cancel = "Cancel", danger = false, body = null, onBody = null, confirmWord = "" }) {
   return new Promise(resolve => {
     const d = $("#dlg"), inp = $("#dlginput"), okb = $("#dlgok"), list = $("#dlgchoices"), bodyEl = $("#dlgbody");
     $("#dlgtitle").textContent = title;
     $("#dlgmsg").textContent = message; $("#dlgmsg").hidden = !message;
-    inp.hidden = input === null;
+    const showInput = input !== null || !!confirmWord, word = confirmWord.toLowerCase();
+    inp.hidden = !showInput;
     if (input) { inp.value = input.value || ""; inp.placeholder = input.placeholder || ""; }
+    if (confirmWord) { inp.value = ""; inp.placeholder = `Type ${confirmWord} to confirm`; }
+    inp.oninput = confirmWord ? () => { okb.disabled = inp.value.trim().toLowerCase() !== word; } : null;
     list.hidden = !choices;
     list.innerHTML = choices ? choices.map((c, i) => `<button type="button" class="choice" data-i="${i}">${esc(c.label)}</button>`).join("") : "";
     bodyEl.hidden = !body; bodyEl.innerHTML = body || "";
-    okb.hidden = !!choices; okb.textContent = ok; okb.classList.toggle("danger", danger);
+    okb.hidden = !!choices; okb.textContent = ok; okb.classList.toggle("danger", danger); okb.disabled = !!confirmWord;
     $("#dlgcancel").textContent = cancel;
     let result = null;
     const done = v => { result = v; d.close(); };
     list.onclick = e => { const b = e.target.closest(".choice"); if (b) done(choices[+b.dataset.i].value); };
-    $("#dlgform").onsubmit = e => { e.preventDefault(); if (input !== null && !inp.value.trim()) { inp.focus(); return; } done(input !== null ? inp.value.trim() : true); };
+    $("#dlgform").onsubmit = e => { e.preventDefault(); if (confirmWord && inp.value.trim().toLowerCase() !== word) { inp.focus(); return; } if (input !== null && !inp.value.trim()) { inp.focus(); return; } done(input !== null ? inp.value.trim() : true); };
     $("#dlgcancel").onclick = () => done(null);
     d.onclose = () => resolve(result);   // Esc closes it too
     d.showModal();
     if (onBody) onBody(bodyEl);
-    (input !== null ? inp : choices ? list.querySelector(".choice") || okb : okb).focus();
-    if (input !== null) inp.select();
+    (showInput ? inp : choices ? list.querySelector(".choice") || okb : okb).focus();
+    if (showInput) inp.select();
   });
 }
 
@@ -1341,7 +1344,7 @@ $("#plrename").onclick = async () => {
 $("#pldelete").onclick = async () => {
   const p = S.playlists.find(x => x.id === S.plId);
   if (!p) return;
-  if (!await ask({ title: `Delete “${p.title}”?`, message: "It is deleted in YouTube Music too. This can't be undone from here.", ok: "Delete", danger: true })) return;
+  if (!await ask({ title: `Delete “${p.title}”?`, message: "It is deleted in YouTube Music too. This can't be undone from here.", ok: "Delete", danger: true, confirmWord: "yes" })) return;
   try {
     await post("/api/playlist/delete", { playlist: p.id });
     S.playlists = S.playlists.filter(x => x.id !== p.id); S.allTracks = null; S.sig = "";
