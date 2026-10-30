@@ -241,7 +241,6 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
   .row { grid-template-columns: 40px minmax(0, 1fr) 30px 30px 52px; }
   .row .idx, .row .alb { display: none; }
   #player { grid-template-columns: 1fr; gap: 8px; padding: 10px 16px; }
-  .right { display: none; }
 }
 
 .queue, .lyrics { left: auto; right: 12px; bottom: 96px; width: min(380px, 94vw); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -332,13 +331,10 @@ dialog#dlg::backdrop { background: rgba(0, 0, 0, .55); }
 .candidate a { color: var(--accent); }
 .queue, .lyrics { bottom: calc(var(--player-height, 84px) + 10px); max-height: calc(100dvh - var(--player-height, 84px) - 24px); }
 .queue [data-morequeue] { width: 100%; margin: 8px 0; }
-#morecontrols { display: none; }
 #player { grid-template-columns: minmax(200px, 1fr) minmax(240px, 1.4fr) minmax(300px, 1fr); gap: 12px; }
 @media (max-width: 1000px) {
-  #morecontrols { display: inline-block; }
   #player { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  #player .right { display: none; }
-  #player.controls-open .right { display: flex; justify-content: center; flex-wrap: wrap; }
+  #player .right { justify-content: center; flex-wrap: wrap; }
   #locatebtn { display: inline-flex; }
   .np > div { flex: 1; }
   .head > div { flex-basis: 160px; }

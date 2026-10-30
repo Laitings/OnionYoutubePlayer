@@ -248,11 +248,7 @@ async function showBackups() {
   } catch (e) { onApiError(e); }
 }
 
-/* Small windows keep every control reachable instead of hiding the right column. */
-$("#morecontrols").onclick = () => {
-  const open = $("#player").classList.toggle("controls-open");
-  $("#morecontrols").setAttribute("aria-expanded", String(open));
-};
+/* The player bar grows taller in narrow windows, so the popups follow its height. */
 new ResizeObserver(() => {
   document.documentElement.style.setProperty("--player-height", $("#player").offsetHeight + "px");
 }).observe($("#player"));
