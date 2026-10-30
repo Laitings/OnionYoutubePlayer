@@ -349,7 +349,7 @@ dialog#dlg::backdrop { background: rgba(0, 0, 0, .55); }
   .dcopy { gap: 5px; }
 }
 
-body.mini { margin: 0; padding: 10px 12px; height: 100vh; box-sizing: border-box; display: grid; grid-template-columns: 64px minmax(0, 1fr); grid-template-rows: auto auto auto; gap: 4px 12px; align-items: center; background: var(--panel); color: var(--text); overflow: hidden; }
+body.mini { margin: 0; padding: 10px 12px; height: 100vh; align-content: center; box-sizing: border-box; display: grid; grid-template-columns: 64px minmax(0, 1fr); grid-template-rows: auto auto auto; gap: 4px 12px; align-items: center; background: var(--panel); color: var(--text); overflow: hidden; }
 .mini #m-art { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; grid-row: 1 / span 2; }
 .mini .m-info { min-width: 0; }
 .mini #m-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1744,81 +1744,55 @@ function setMuted(m) {
 }
 $("#mutebtn").onclick = () => setMuted(!muted);
 
-/* ---------- mini player: a small window that stays on top of other windows ---------- */
-const mini = { win: null };
-function buildMini(w) {
-  const d = w.document;
-  d.title = "Onion mini player";
-  const css = d.createElement("link");
-  css.rel = "stylesheet"; css.href = location.origin + "/style.css";
-  d.head.append(css);
-  d.body.className = "mini";
-  d.body.innerHTML = `
-    <img id="m-art" alt="" referrerpolicy="no-referrer">
-    <div class="m-info"><div id="m-title"></div><div id="m-artist"></div></div>
-    <div class="m-ctl">
-      <button class="ib" id="m-prev" title="Previous">${$("#prev").innerHTML}</button>
-      <button class="ib" id="m-play" title="Play / pause"><svg id="m-ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><svg id="m-ico-pause" viewBox="0 0 24 24" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></button>
-      <button class="ib" id="m-next" title="Next">${$("#next").innerHTML}</button>
-      <button class="ib" id="m-mute">${$("#mutebtn").innerHTML}</button>
-    </div>
-    <input id="m-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">`;
-  const $m = id => d.getElementById(id);
-  $m("m-prev").onclick = prev;
-  $m("m-next").onclick = next;
-  $m("m-play").onclick = togglePlay;
-  $m("m-mute").onclick = () => setMuted(!muted);
-  $m("m-seek").addEventListener("input", () => { audio.currentTime = $m("m-seek").value / 1000 * dur(); paint($m("m-seek")); });
-  $m("m-art").onerror = e => { e.target.onerror = null; e.target.src = location.origin + "/logo.svg"; };
-  d.addEventListener("keydown", e => {
-    if (e.key === " ") { e.preventDefault(); togglePlay(); }
-    else if (e.key === "m") setMuted(!muted);
-    else if (e.key === "n") next();
-    else if (e.key === "p") prev();
-  });
-  mini.win = w;
-  w.addEventListener("pagehide", () => { if (mini.win === w) mini.win = null; });
-  miniSync();
+/* ---------- mini player: a second small app window, steered through the server ---------- */
+const mini = { open: false, pushedAt: 0, launched: 0, pumping: false };
+function miniState() {
+  const t = S.cur;
+  return { title: t ? t.title : "Nothing playing", artist: t ? t.artists : "", art: t && t.art ? artUrl(t.art, 160) : "/logo.svg",
+    playing: !audio.paused, muted, pos: audio.currentTime || 0, dur: dur(), at: Date.now() };
 }
 function miniSync() {
-  const w = mini.win;
-  if (!w) return;
-  try {
-    const d = w.document, t = S.cur, playing = !audio.paused, $m = id => d.getElementById(id);
-    $m("m-title").textContent = t ? t.title : "Nothing playing";
-    $m("m-artist").textContent = t ? t.artists : "";
-    const art = t && t.art ? artUrl(t.art, 160) : "/logo.svg", abs = new URL(art, location.href).href;
-    if ($m("m-art").src !== abs) $m("m-art").src = abs;
-    $m("m-ico-play").toggleAttribute("hidden", playing);
-    $m("m-ico-pause").toggleAttribute("hidden", !playing);
-    const [on, off] = $m("m-mute").querySelectorAll("svg");
-    on.toggleAttribute("hidden", muted); off.toggleAttribute("hidden", !muted);
-    $m("m-mute").title = muted ? "Unmute" : "Mute";
-    d.title = t ? `${t.title} – ${t.artists}` : "Onion mini player";
-    miniTime();
-  } catch { mini.win = null; }   // the window went away
+  if (!mini.open) return;
+  mini.pushedAt = Date.now();
+  post("/api/mini/push", miniState()).catch(() => {});
 }
-function miniTime() {
-  const w = mini.win;
-  if (!w) return;
+function miniTime() { if (mini.open && Date.now() - mini.pushedAt > 900) miniSync(); }
+function runMiniCmd(c) {
+  if (c.cmd === "play") togglePlay();
+  else if (c.cmd === "prev") prev();
+  else if (c.cmd === "next") next();
+  else if (c.cmd === "mute") setMuted(!muted);
+  else if (c.cmd === "seek" && typeof c.value === "number") audio.currentTime = c.value / 1000 * dur();
+}
+async function miniPump() {
+  if (mini.pumping) return;
+  mini.pumping = true;
   try {
-    const el = w.document.getElementById("m-seek"), d = dur();
-    if (el && w.document.activeElement !== el) { el.value = d ? audio.currentTime / d * 1000 : 0; paint(el); }
-  } catch { mini.win = null; }
+    while (mini.open) {
+      const r = await api("/api/mini/commands?wait=20");   // waits on the server, so a minimized window is not slowed down
+      r.cmds.forEach(runMiniCmd);
+      if (!r.open && Date.now() - mini.launched > 10000) mini.open = false;
+    }
+  } catch { mini.open = false; }
+  mini.pumping = false;
+  $("#minibtn").setAttribute("aria-pressed", String(mini.open));
+}
+function miniAttach() {
+  mini.open = true; mini.launched = Date.now();
+  $("#minibtn").setAttribute("aria-pressed", "true");
+  miniSync();
+  miniPump();
 }
 $("#minibtn").onclick = async () => {
-  if (mini.win) { try { mini.win.close(); } catch { /* already gone */ } mini.win = null; return; }
-  let w = null;
-  if ("documentPictureInPicture" in window) {
-    try { w = await documentPictureInPicture.requestWindow({ width: 360, height: 160 }); }
-    catch (e) { toast(`Couldn't open the mini player: ${e.message}`); return; }
-  } else {
-    w = window.open("", "onionmini", "popup,width=360,height=160");   // older browsers: a small window that does not stay on top
-    if (!w) return toast("The mini player was blocked. Allow pop-ups for this page and try again.");
-  }
-  buildMini(w);
+  try {
+    if (mini.open) { await post("/api/mini/close", {}); return; }
+    const r = await post("/api/mini/open", {});
+    if (!r.ok) return;
+    miniAttach();
+  } catch (e) { toast(`Couldn't open the mini player: ${e.message}`); }
 };
-addEventListener("pagehide", () => { try { mini.win && mini.win.close(); } catch { /* ignore */ } });
+api("/api/mini/alive").then(r => { if (r.open) miniAttach(); }).catch(() => {});   // the window was already open when this page loaded
+
 
 /* ---------- start ---------- */
 function bootPlayer() {

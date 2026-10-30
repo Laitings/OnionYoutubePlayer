@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#150f1c">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>Onion mini player</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="mini">
+  <img id="m-art" alt="" src="/logo.svg" referrerpolicy="no-referrer">
+  <div class="m-info"><div id="m-title">Onion</div><div id="m-artist"></div></div>
+  <div class="m-ctl">
+    <button class="ib" id="m-prev" title="Previous (P)" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
+    <button class="ib" id="m-play" title="Play / pause (Space)" aria-label="Play"><svg id="m-ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><svg id="m-ico-pause" viewBox="0 0 24 24" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></button>
+    <button class="ib" id="m-next" title="Next (N)" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+    <button class="ib" id="m-mute" title="Mute (M)" aria-label="Mute"><svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg><svg viewBox="0 0 24 24" hidden><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg></button>
+  </div>
+  <input id="m-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let st = {}, seeking = false, fails = 0;
+const send = (cmd, value) => fetch("/api/mini/cmd", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cmd, value }) }).catch(() => {});
+const paint = el => el.style.setProperty("--p", (el.value / el.max * 100) + "%");
+$("m-prev").onclick = () => send("prev");
+$("m-next").onclick = () => send("next");
+$("m-play").onclick = () => send("play");
+$("m-mute").onclick = () => send("mute");
+$("m-seek").addEventListener("input", () => { seeking = true; paint($("m-seek")); });
+$("m-seek").addEventListener("change", () => { send("seek", +$("m-seek").value); setTimeout(() => { seeking = false; }, 600); });
+addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === " ") { e.preventDefault(); send("play"); }
+  else if (e.key === "m") send("mute");
+  else if (e.key === "n") send("next");
+  else if (e.key === "p") send("prev");
+});
+$("m-art").onerror = e => { e.target.onerror = null; e.target.src = "/logo.svg"; };
+function render() {
+  const t = st.title || "Nothing playing", a = st.artist || "";
+  if ($("m-title").textContent !== t) $("m-title").textContent = t;
+  $("m-artist").textContent = a;
+  document.title = st.title ? `${t} – ${a}` : "Onion mini player";
+  const art = new URL(st.art || "/logo.svg", location.href).href;
+  if ($("m-art").src !== art) $("m-art").src = art;
+  $("m-ico-play").toggleAttribute("hidden", !!st.playing);
+  $("m-ico-pause").toggleAttribute("hidden", !st.playing);
+  $("m-play").setAttribute("aria-label", st.playing ? "Pause" : "Play");
+  const [on, off] = $("m-mute").querySelectorAll("svg");
+  on.toggleAttribute("hidden", !!st.muted); off.toggleAttribute("hidden", !st.muted);
+  $("m-mute").setAttribute("aria-pressed", String(!!st.muted));
+  if (!seeking && st.dur) {
+    const pos = st.pos + (st.playing ? (Date.now() - st.at) / 1000 : 0);   // the page pushes a few times a second, in between we keep counting
+    $("m-seek").value = Math.min(1000, Math.max(0, pos / st.dur * 1000));
+    paint($("m-seek"));
+  }
+}
+async function poll() {
+  try {
+    const r = await (await fetch("/api/mini/state")).json();
+    fails = 0;
+    if (r.close) { window.close(); return; }
+    st = r.state || {};
+    render();
+  } catch {
+    if (++fails > 6) { $("m-title").textContent = "Onion Player was closed"; window.close(); }
+  }
+}
+setInterval(poll, 500);
+poll();
+/* the next start opens the window where you left it */
+let lastPos = "";
+setInterval(() => {
+  const pos = Math.round(screenX) + "," + Math.round(screenY);
+  if (pos === lastPos || screenX < -10000) return;
+  lastPos = pos;
+  try { navigator.sendBeacon("/api/miniwindow", new Blob([JSON.stringify({ x: Math.round(screenX), y: Math.round(screenY) })], { type: "application/json" })); } catch { /* not worth a message */ }
+}, 3000);
+</script>
+</body>
+</html>

@@ -4,8 +4,10 @@ ytmusicapi reads your library and playlists, yt-dlp finds the audio stream,
 and this server hands that audio to the browser. It only listens on
 127.0.0.1, because it uses your YouTube login.
 """
+import asyncio
 import json
 import functools
+import subprocess
 import uuid
 from playlist_backups import BackupStore, batches
 import mimetypes
@@ -1428,6 +1430,119 @@ async def audio(video_id: str, request: Request):
                 await cl.aclose()
 
         return StreamingResponse(body(), status_code=upstream.status_code, headers=keep)
+
+
+# ---------------------------------------------------------------- the mini player window
+# A second, small app window (static/mini.html). The main page pushes what is playing to the server, the mini window
+# reads it from there and sends button presses back; the main page picks them up. Two browser profiles cannot talk
+# to each other directly, which is why it goes through here.
+
+_mini = {"state": {}, "cmds": [], "seen": -1e9, "close": False}
+MINI_FILE = BASE / "mini-window.json"
+MINI_COMMANDS = {"play", "prev", "next", "mute", "seek"}
+
+
+def find_browser() -> str | None:
+    roots = [os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")]
+    paths = [Path(r) / "Microsoft" / "Edge" / "Application" / "msedge.exe" for r in roots if r]
+    paths += [Path(r) / "Google" / "Chrome" / "Application" / "chrome.exe" for r in roots if r]
+    if os.environ.get("LOCALAPPDATA"):
+        paths.append(Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    return next((str(p) for p in paths if p.is_file()), None)
+
+
+def mini_alive() -> bool:
+    return time.monotonic() - _mini["seen"] < 4
+
+
+@app.get("/api/mini/alive")
+async def mini_is_open():
+    return {"open": mini_alive()}
+
+
+@app.post("/api/mini/open")
+async def mini_open():
+    if mini_alive():
+        return {"ok": True, "already": True}
+    browser = find_browser()
+    if not browser:
+        raise HTTPException(500, "Edge or Chrome was not found, so the mini player can't open.")
+    args = [browser, f"--app=http://127.0.0.1:{PORT}/mini.html", f"--user-data-dir={BASE / 'browser-profile-mini'}",
+            "--no-first-run", "--no-default-browser-check", "--window-size=380,230"]
+    try:
+        pos = json.loads(MINI_FILE.read_text("utf-8"))
+        if isinstance(pos.get("x"), int) and isinstance(pos.get("y"), int):
+            args.append(f"--window-position={pos['x']},{pos['y']}")
+    except (OSError, ValueError):
+        pass
+    try:
+        subprocess.Popen(args, close_fds=True)
+    except OSError as exc:
+        raise HTTPException(500, f"Couldn't start the mini player: {exc}")
+    _mini["cmds"].clear()
+    return {"ok": True}
+
+
+@app.post("/api/mini/push")
+async def mini_push(request: Request):
+    """The main page says what is playing."""
+    body = await request.json()
+    if isinstance(body, dict):
+        _mini["state"] = {k: body[k] for k in ("title", "artist", "art", "playing", "muted", "pos", "dur", "at") if k in body}
+    return {"open": mini_alive()}
+
+
+@app.get("/api/mini/state")
+async def mini_state():
+    """The mini window asks what to show. It also counts as a sign of life."""
+    _mini["seen"] = time.monotonic()
+    close, _mini["close"] = _mini["close"], False
+    return {"state": _mini["state"], "close": close}
+
+
+class MiniCmd(BaseModel):
+    cmd: str
+    value: float | None = None
+
+
+@app.post("/api/mini/cmd")
+async def mini_cmd(body: MiniCmd):
+    if body.cmd not in MINI_COMMANDS:
+        raise HTTPException(400, "Unknown command")
+    if len(_mini["cmds"]) < 20:
+        _mini["cmds"].append({"cmd": body.cmd, "value": body.value})
+    return {"ok": True}
+
+
+@app.get("/api/mini/commands")
+async def mini_commands(wait: int = 20):
+    """The main page waits here for button presses from the mini window."""
+    end = time.monotonic() + max(0, min(wait, 25))
+    while not _mini["cmds"] and time.monotonic() < end:
+        await asyncio.sleep(0.25)
+    cmds, _mini["cmds"] = _mini["cmds"], []
+    return {"cmds": cmds, "open": mini_alive()}
+
+
+@app.post("/api/mini/close")
+async def mini_close():
+    _mini["close"] = True
+    return {"ok": True}
+
+
+class MiniPos(BaseModel):
+    x: int
+    y: int
+
+
+@app.post("/api/miniwindow")
+def mini_window(body: MiniPos):
+    if -10000 <= body.x <= 20000 and -10000 <= body.y <= 20000:
+        try:
+            MINI_FILE.write_text(json.dumps({"x": body.x, "y": body.y}), "utf-8")
+        except OSError:
+            pass
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- remember the app window's size and position
