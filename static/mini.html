@@ -73,6 +73,7 @@ async function poll() {
     if (++fails > 6) { $("m-title").textContent = "Onion Player was closed"; window.close(); }
   }
 }
+paint($("m-vol"));   // colored from the first moment, before the first answer from the server
 setInterval(poll, 500);
 poll();
 /* the next start opens the window where you left it */
