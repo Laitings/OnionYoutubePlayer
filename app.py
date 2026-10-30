@@ -1468,13 +1468,17 @@ async def mini_open():
     if not browser:
         raise HTTPException(500, "Edge or Chrome was not found, so the mini player can't open.")
     args = [browser, f"--app=http://127.0.0.1:{PORT}/mini.html", f"--user-data-dir={BASE / 'browser-profile-mini'}",
-            "--no-first-run", "--no-default-browser-check", "--window-size=380,230"]
+            "--no-first-run", "--no-default-browser-check"]
+    size = "380,230"
     try:
         pos = json.loads(MINI_FILE.read_text("utf-8"))
         if isinstance(pos.get("x"), int) and isinstance(pos.get("y"), int):
             args.append(f"--window-position={pos['x']},{pos['y']}")
+        if isinstance(pos.get("w"), int) and isinstance(pos.get("h"), int) and 250 <= pos["w"] <= 3000 and 150 <= pos["h"] <= 3000:
+            size = f"{pos['w']},{pos['h']}"
     except (OSError, ValueError):
         pass
+    args.append(f"--window-size={size}")
     try:
         subprocess.Popen(args, close_fds=True)
     except OSError as exc:
@@ -1548,13 +1552,18 @@ async def mini_gone():
 class MiniPos(BaseModel):
     x: int
     y: int
+    w: int | None = None
+    h: int | None = None
 
 
 @app.post("/api/miniwindow")
 def mini_window(body: MiniPos):
     if -10000 <= body.x <= 20000 and -10000 <= body.y <= 20000:
+        data = {"x": body.x, "y": body.y}
+        if body.w and body.h and 250 <= body.w <= 3000 and 150 <= body.h <= 3000:
+            data.update(w=body.w, h=body.h)
         try:
-            MINI_FILE.write_text(json.dumps({"x": body.x, "y": body.y}), "utf-8")
+            MINI_FILE.write_text(json.dumps(data), "utf-8")
         except OSError:
             pass
     return {"ok": True}

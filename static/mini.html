@@ -84,14 +84,17 @@ paint($("m-vol"));   // colored from the first moment, before the first answer f
 addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/mini/gone"); } catch { /* the server notices a few seconds later */ } });
 setInterval(poll, 500);
 poll();
-/* the next start opens the window where you left it */
+/* the next start opens the window where you left it, the same size */
 let lastPos = "";
-setInterval(() => {
-  const pos = Math.round(screenX) + "," + Math.round(screenY);
-  if (pos === lastPos || screenX < -10000) return;
-  lastPos = pos;
-  try { navigator.sendBeacon("/api/miniwindow", new Blob([JSON.stringify({ x: Math.round(screenX), y: Math.round(screenY) })], { type: "application/json" })); } catch { /* not worth a message */ }
-}, 3000);
+function savePlace(force) {
+  const x = Math.round(screenX), y = Math.round(screenY), w = Math.round(outerWidth), h = Math.round(outerHeight);
+  const key = [x, y, w, h].join();
+  if ((key === lastPos && !force) || x < -10000 || w < 250 || h < 150) return;
+  lastPos = key;
+  try { navigator.sendBeacon("/api/miniwindow", new Blob([JSON.stringify({ x, y, w, h })], { type: "application/json" })); } catch { /* not worth a message */ }
+}
+setInterval(savePlace, 2000);
+addEventListener("pagehide", () => savePlace(true));
 </script>
 </body>
 </html>
