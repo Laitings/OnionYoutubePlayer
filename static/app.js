@@ -1773,7 +1773,8 @@ async function miniPump() {
     while (mini.open) {
       const r = await api("/api/mini/commands?wait=20");   // waits on the server, so a minimized window is not slowed down
       r.cmds.forEach(runMiniCmd);
-      if (!r.open && Date.now() - mini.launched > 10000) mini.open = false;
+      if (r.ready && !r.open) mini.open = false;   // it was open and now it is gone
+      else if (!r.ready && Date.now() - mini.launched > 10000) mini.open = false;   // it never came up
     }
   } catch { mini.open = false; }
   mini.pumping = false;
@@ -1787,7 +1788,7 @@ function miniAttach() {
 }
 $("#minibtn").onclick = async () => {
   try {
-    if (mini.open) { await post("/api/mini/close", {}); return; }
+    if (mini.open && (await post("/api/mini/close", {})).wasOpen) return;   // otherwise the page was out of date: open a new one
     const r = await post("/api/mini/open", {});
     if (!r.ok) return;
     miniAttach();

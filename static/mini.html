@@ -81,6 +81,7 @@ async function poll() {
   }
 }
 paint($("m-vol"));   // colored from the first moment, before the first answer from the server
+addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/mini/gone"); } catch { /* the server notices a few seconds later */ } });
 setInterval(poll, 500);
 poll();
 /* the next start opens the window where you left it */

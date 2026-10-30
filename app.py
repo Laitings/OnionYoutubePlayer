@@ -1437,7 +1437,7 @@ async def audio(video_id: str, request: Request):
 # reads it from there and sends button presses back; the main page picks them up. Two browser profiles cannot talk
 # to each other directly, which is why it goes through here.
 
-_mini = {"state": {}, "cmds": [], "seen": -1e9, "close": False}
+_mini = {"state": {}, "cmds": [], "seen": -1e9, "close": False, "ready": False}   # ready: the window has answered since it was opened
 MINI_FILE = BASE / "mini-window.json"
 MINI_COMMANDS = {"play", "prev", "next", "mute", "seek", "volume"}
 
@@ -1452,7 +1452,7 @@ def find_browser() -> str | None:
 
 
 def mini_alive() -> bool:
-    return time.monotonic() - _mini["seen"] < 4
+    return time.monotonic() - _mini["seen"] < 2.5
 
 
 @app.get("/api/mini/alive")
@@ -1480,6 +1480,8 @@ async def mini_open():
     except OSError as exc:
         raise HTTPException(500, f"Couldn't start the mini player: {exc}")
     _mini["cmds"].clear()
+    _mini["close"] = False
+    _mini["ready"] = False
     return {"ok": True}
 
 
@@ -1496,6 +1498,7 @@ async def mini_push(request: Request):
 async def mini_state():
     """The mini window asks what to show. It also counts as a sign of life."""
     _mini["seen"] = time.monotonic()
+    _mini["ready"] = True
     close, _mini["close"] = _mini["close"], False
     return {"state": _mini["state"], "close": close}
 
@@ -1518,15 +1521,28 @@ async def mini_cmd(body: MiniCmd):
 async def mini_commands(wait: int = 20):
     """The main page waits here for button presses from the mini window."""
     end = time.monotonic() + max(0, min(wait, 25))
+    was_open = mini_alive()
     while not _mini["cmds"] and time.monotonic() < end:
+        if was_open and not mini_alive():
+            break   # the window was closed: tell the page at once
         await asyncio.sleep(0.25)
     cmds, _mini["cmds"] = _mini["cmds"], []
-    return {"cmds": cmds, "open": mini_alive()}
+    return {"cmds": cmds, "open": mini_alive(), "ready": _mini["ready"]}
 
 
 @app.post("/api/mini/close")
 async def mini_close():
-    _mini["close"] = True
+    was_open = mini_alive()
+    if was_open:   # a flag left over for a window that is not there would close the next one the moment it opens
+        _mini["close"] = True
+    return {"ok": True, "wasOpen": was_open}
+
+
+@app.post("/api/mini/gone")
+async def mini_gone():
+    """The mini window says goodbye (its X, or Alt+F4)."""
+    _mini["seen"] = -1e9
+    _mini["close"] = False
     return {"ok": True}
 
 
