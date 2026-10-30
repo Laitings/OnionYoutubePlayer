@@ -815,6 +815,7 @@ function showNowPlaying(t) {
   $("#tcur").textContent = "0:00";
   $("#tdur").textContent = fmt(t.duration);
   seek.value = 0; paint(seek);
+  miniSync();
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title, artist: t.artists, album: t.album,
@@ -844,6 +845,7 @@ on("timeupdate", () => {
   $("#tdur").textContent = fmt(d);
   saveNow();
   syncLyrics();
+  miniTime();
   if ("mediaSession" in navigator && d && isFinite(audio.duration)) {
     try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(audio.currentTime, d), playbackRate: audio.playbackRate }); } catch { /* not supported */ }
   }
@@ -857,6 +859,7 @@ function showPlayState() {
   $("#play").setAttribute("aria-label", playing ? "Pause" : "Play");
   $("#play").classList.toggle("loading", playing && audio.readyState < 3);   // pulses while the song is still loading
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+  miniSync();
 }
 on("play", showPlayState);
 on("waiting", showPlayState);
@@ -924,7 +927,7 @@ function setVolume() {
   paint(vol);
   store.set("vol", +vol.value);
 }
-vol.addEventListener("input", setVolume);
+vol.addEventListener("input", () => { if (muted) setMuted(false); setVolume(); });
 
 /* media keys + keyboard */
 if ("mediaSession" in navigator) {
@@ -952,6 +955,7 @@ document.addEventListener("keydown", e => {
     case "r": cycleRepeat(); break;
     case "l": likeCurrent(); break;
     case "q": toggleQueue(); break;
+    case "m": setMuted(!muted); break;
     case "/": e.preventDefault(); $("#q").focus(); $("#q").select(); break;
     case "ArrowRight": audio.currentTime += 5; break;
     case "ArrowLeft": audio.currentTime = Math.max(0, audio.currentTime - 5); break;
@@ -1724,10 +1728,103 @@ document.addEventListener("pointerdown", e => {
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !queuePanel.hidden) { closeQueue(); queueBtn.focus(); } });
 
+/* ---------- mute ---------- */
+let muted = store.get("muted", false);
+function setMuted(m) {
+  muted = !!m;
+  both(el => { el.muted = muted; });
+  const b = $("#mutebtn");
+  b.setAttribute("aria-pressed", String(muted));
+  b.title = muted ? "Unmute (M)" : "Mute (M)";
+  b.setAttribute("aria-label", muted ? "Unmute" : "Mute");
+  const [on, off] = b.querySelectorAll("svg");
+  on.toggleAttribute("hidden", muted); off.toggleAttribute("hidden", !muted);
+  store.set("muted", muted);
+  miniSync();
+}
+$("#mutebtn").onclick = () => setMuted(!muted);
+
+/* ---------- mini player: a small window that stays on top of other windows ---------- */
+const mini = { win: null };
+function buildMini(w) {
+  const d = w.document;
+  d.title = "Onion mini player";
+  const css = d.createElement("link");
+  css.rel = "stylesheet"; css.href = location.origin + "/style.css";
+  d.head.append(css);
+  d.body.className = "mini";
+  d.body.innerHTML = `
+    <img id="m-art" alt="" referrerpolicy="no-referrer">
+    <div class="m-info"><div id="m-title"></div><div id="m-artist"></div></div>
+    <div class="m-ctl">
+      <button class="ib" id="m-prev" title="Previous">${$("#prev").innerHTML}</button>
+      <button class="ib" id="m-play" title="Play / pause"><svg id="m-ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><svg id="m-ico-pause" viewBox="0 0 24 24" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></button>
+      <button class="ib" id="m-next" title="Next">${$("#next").innerHTML}</button>
+      <button class="ib" id="m-mute">${$("#mutebtn").innerHTML}</button>
+    </div>
+    <input id="m-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">`;
+  const $m = id => d.getElementById(id);
+  $m("m-prev").onclick = prev;
+  $m("m-next").onclick = next;
+  $m("m-play").onclick = togglePlay;
+  $m("m-mute").onclick = () => setMuted(!muted);
+  $m("m-seek").addEventListener("input", () => { audio.currentTime = $m("m-seek").value / 1000 * dur(); paint($m("m-seek")); });
+  $m("m-art").onerror = e => { e.target.onerror = null; e.target.src = location.origin + "/logo.svg"; };
+  d.addEventListener("keydown", e => {
+    if (e.key === " ") { e.preventDefault(); togglePlay(); }
+    else if (e.key === "m") setMuted(!muted);
+    else if (e.key === "n") next();
+    else if (e.key === "p") prev();
+  });
+  mini.win = w;
+  w.addEventListener("pagehide", () => { if (mini.win === w) mini.win = null; });
+  miniSync();
+}
+function miniSync() {
+  const w = mini.win;
+  if (!w) return;
+  try {
+    const d = w.document, t = S.cur, playing = !audio.paused, $m = id => d.getElementById(id);
+    $m("m-title").textContent = t ? t.title : "Nothing playing";
+    $m("m-artist").textContent = t ? t.artists : "";
+    const art = t && t.art ? artUrl(t.art, 160) : "/logo.svg", abs = new URL(art, location.href).href;
+    if ($m("m-art").src !== abs) $m("m-art").src = abs;
+    $m("m-ico-play").toggleAttribute("hidden", playing);
+    $m("m-ico-pause").toggleAttribute("hidden", !playing);
+    const [on, off] = $m("m-mute").querySelectorAll("svg");
+    on.toggleAttribute("hidden", muted); off.toggleAttribute("hidden", !muted);
+    $m("m-mute").title = muted ? "Unmute" : "Mute";
+    d.title = t ? `${t.title} – ${t.artists}` : "Onion mini player";
+    miniTime();
+  } catch { mini.win = null; }   // the window went away
+}
+function miniTime() {
+  const w = mini.win;
+  if (!w) return;
+  try {
+    const el = w.document.getElementById("m-seek"), d = dur();
+    if (el && w.document.activeElement !== el) { el.value = d ? audio.currentTime / d * 1000 : 0; paint(el); }
+  } catch { mini.win = null; }
+}
+$("#minibtn").onclick = async () => {
+  if (mini.win) { try { mini.win.close(); } catch { /* already gone */ } mini.win = null; return; }
+  let w = null;
+  if ("documentPictureInPicture" in window) {
+    try { w = await documentPictureInPicture.requestWindow({ width: 360, height: 160 }); }
+    catch (e) { toast(`Couldn't open the mini player: ${e.message}`); return; }
+  } else {
+    w = window.open("", "onionmini", "popup,width=360,height=160");   // older browsers: a small window that does not stay on top
+    if (!w) return toast("The mini player was blocked. Allow pop-ups for this page and try again.");
+  }
+  buildMini(w);
+};
+addEventListener("pagehide", () => { try { mini.win && mini.win.close(); } catch { /* ignore */ } });
+
 /* ---------- start ---------- */
 function bootPlayer() {
 vol.value = store.get("vol", 80);
 setVolume();
+setMuted(muted);
 showModes();
 showPlayState();
 restoreNow();
