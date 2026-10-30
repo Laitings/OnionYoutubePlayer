@@ -1556,6 +1556,14 @@ class MiniPos(BaseModel):
     h: int | None = None
 
 
+@app.get("/api/miniwindow")
+def mini_window_saved():
+    try:
+        return json.loads(MINI_FILE.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 @app.post("/api/miniwindow")
 def mini_window(body: MiniPos):
     if -10000 <= body.x <= 20000 and -10000 <= body.y <= 20000:

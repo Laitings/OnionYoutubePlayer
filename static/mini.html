@@ -84,9 +84,20 @@ paint($("m-vol"));   // colored from the first moment, before the first answer f
 addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/mini/gone"); } catch { /* the server notices a few seconds later */ } });
 setInterval(poll, 500);
 poll();
-/* the next start opens the window where you left it, the same size */
-let lastPos = "";
+/* The window is put back where you left it, at the same size. The browser is asked for that when it starts, but a browser
+   that is still running from last time ignores it, so the page does it itself as well. */
+let lastPos = "", placed = false;
+async function restorePlace() {
+  try {
+    const p = await (await fetch("/api/miniwindow")).json();
+    if (Number.isInteger(p.w) && Number.isInteger(p.h) && (Math.abs(outerWidth - p.w) > 3 || Math.abs(outerHeight - p.h) > 3)) resizeTo(p.w, p.h);
+    if (Number.isInteger(p.x) && Number.isInteger(p.y) && (Math.abs(screenX - p.x) > 3 || Math.abs(screenY - p.y) > 3)) moveTo(p.x, p.y);
+  } catch { /* stay where the browser put it */ }
+  setTimeout(() => { placed = true; }, 1500);   // only after this do moves count as the user's own
+}
+restorePlace();
 function savePlace(force) {
+  if (!placed) return;
   const x = Math.round(screenX), y = Math.round(screenY), w = Math.round(outerWidth), h = Math.round(outerHeight);
   const key = [x, y, w, h].join();
   if ((key === lastPos && !force) || x < -10000 || w < 250 || h < 150) return;
