@@ -1521,10 +1521,9 @@ async def mini_cmd(body: MiniCmd):
 async def mini_commands(wait: int = 20):
     """The main page waits here for button presses from the mini window."""
     end = time.monotonic() + max(0, min(wait, 25))
-    was_open = mini_alive()
     while not _mini["cmds"] and time.monotonic() < end:
-        if was_open and not mini_alive():
-            break   # the window was closed: tell the page at once
+        if _mini["ready"] and not mini_alive():
+            break   # the window came up and is now gone: tell the page at once, even if this wait started before it opened
         await asyncio.sleep(0.25)
     cmds, _mini["cmds"] = _mini["cmds"], []
     return {"cmds": cmds, "open": mini_alive(), "ready": _mini["ready"]}
