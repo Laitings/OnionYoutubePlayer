@@ -23,6 +23,7 @@
     <nav id="playlists" aria-label="Playlists"></nav>
     <div class="side-foot">
       <div id="bgstatus" class="bgstatus" role="status"></div>
+      <button id="newpl" class="ghost">New playlist</button>
       <button id="syncall" class="ghost">Sync all playlists</button>
       <button id="relogin" class="ghost">Update login</button>
     </div>
@@ -35,6 +36,10 @@
         <h1 id="plname">Onion</h1>
         <p id="plmeta"></p>
       </div>
+      <button id="pldups" class="ghost" hidden></button>
+      <button id="plrename" class="ghost" hidden>Rename</button>
+      <button id="pldelete" class="ghost" hidden>Delete</button>
+      <button id="clearhist" class="ghost" hidden>Clear</button>
       <button id="sync" class="ghost">Sync</button>
     </div>
 
@@ -45,6 +50,7 @@
 
     <div class="tools">
       <div id="count" aria-live="polite"></div>
+      <button id="selectbtn" class="ghost" aria-pressed="false" title="Select several songs (Ctrl or Shift click works too)">Select</button>
       <div class="seg" role="group" aria-label="Where to search">
         <button data-scope="one" aria-pressed="true">This playlist</button>
         <button data-scope="all" aria-pressed="false">All synced playlists</button>
@@ -57,6 +63,16 @@
         <option value="short">Shortest first</option>
         <option value="long">Longest first</option>
       </select>
+    </div>
+
+    <div id="selbar" hidden>
+      <span id="selcount"></span>
+      <button class="ghost" data-sel="next">Play next</button>
+      <button class="ghost" data-sel="queue">Add to queue</button>
+      <button class="ghost" data-sel="add">Add to playlist</button>
+      <button class="ghost" data-sel="remove" id="selremove">Remove</button>
+      <button class="ghost" data-sel="all">Select all</button>
+      <button class="ghost" data-sel="done">Done</button>
     </div>
 
     <div id="tracks">
@@ -95,6 +111,7 @@
       </div>
       <button class="star" id="npstar" aria-pressed="false" aria-label="Add to liked songs" title="Add to liked songs (L)"><svg viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
       <button class="ib" id="dots" aria-label="More for this song" aria-haspopup="menu" aria-expanded="false" title="More"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg></button>
+      <button class="ib" id="locatebtn" aria-label="Show in the list" title="Show this song in its playlist"><svg viewBox="0 0 24 24"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg></button>
     </div>
     <div class="center">
       <div class="ctl">
@@ -113,6 +130,8 @@
     </div>
     <div class="right">
       <button class="ib" id="queuebtn" aria-haspopup="true" aria-expanded="false" aria-label="Queue" title="Queue"><svg viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0 8h7v2H3zm13-1v8l6-4z"/></svg></button>
+      <button class="ib" id="lyricsbtn" aria-pressed="false" aria-label="Lyrics" title="Lyrics"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></button>
+      <button class="ib" id="sleepbtn" aria-pressed="false" aria-haspopup="true" aria-expanded="false" aria-label="Sleep timer" title="Sleep timer"><svg viewBox="0 0 24 24"><path d="M9 2c-1.05 0-2.05.16-3 .46 4.06 1.27 7 5.06 7 9.54 0 4.48-2.94 8.27-7 9.54.95.3 1.95.46 3 .46 5.52 0 10-4.48 10-10S14.52 2 9 2z"/></svg></button>
       <button class="ib" id="shuffle" aria-pressed="false" aria-label="Shuffle" title="Shuffle (S)"><svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg></button>
       <button class="ib" id="repeat" aria-pressed="false" aria-label="Repeat: off" title="Repeat (R)">
         <svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/><path id="rep1" hidden d="M13 15V9h-1l-2 1v1h1.5v4H13z"/></svg>
@@ -155,7 +174,22 @@
 </div>
 
 <div id="queuepanel" class="menu queue" aria-label="Queue" hidden></div>
+<div id="lyricspanel" class="menu lyrics" aria-label="Lyrics" hidden>
+  <div class="qhead"><span id="lyricstitle">Lyrics</span><button class="ib" id="lyricsclose" aria-label="Close" title="Close"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button></div>
+  <div id="lyricsbody" class="qlist"></div>
+</div>
+<div id="sleeppanel" class="menu" role="menu" hidden></div>
 <div id="songmenu" class="menu" role="menu" hidden></div>
+<dialog id="dlg">
+  <form id="dlgform" method="dialog">
+    <h3 id="dlgtitle"></h3>
+    <p id="dlgmsg" hidden></p>
+    <input id="dlginput" type="text" maxlength="150" autocomplete="off" spellcheck="false" hidden>
+    <div id="dlgchoices" hidden></div>
+    <div id="dlgbody" hidden></div>
+    <div class="dlgbtns"><button type="button" class="ghost" id="dlgcancel">Cancel</button><button class="primary" id="dlgok">OK</button></div>
+  </form>
+</dialog>
 <div id="toast" role="status"></div>
 <audio id="audio" preload="auto"></audio>
 <audio id="audio2" preload="auto"></audio>

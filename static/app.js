@@ -68,6 +68,9 @@ const S = {
   tab: store.get("tab", "playlists"), results: null, sugg: [], suggFor: null,   // results: the last YouTube Music search
   focus: null,    // {id, at}: a song to scroll to and flash the next time the list is drawn
   shuffle: store.get("shuffle", false), repeat: store.get("repeat", "off"),
+  restored: false, resume: null,   // the song from last time is shown but not loaded yet / where to continue it
+  sel: new Set(), selecting: false, lastPick: null,   // rows ticked for a bulk action
+  sleepEnd: false,   // stop when the current song ends
 };
 
 let toastTimer;
@@ -122,7 +125,10 @@ $("#setup-form").addEventListener("submit", async e => {
 });
 
 /* ---------- playlists ---------- */
+const recentEntry = f => (!f || fold("Recently played").includes(f))
+  ? `<button class="pl${S.plId === "recent" ? " active" : ""}" data-id="recent"><span class="t">Recently played</span><span class="n"></span></button>` : "";
 function renderPlaylists() {
+  updateHeadActions();
   const f = fold($("#plfilter").value.trim());
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)));
   $("#plfilter").placeholder = S.tab === "search" ? "Search all of YouTube Music" : S.tab === "albums" ? "Filter albums" : "Filter playlists";
@@ -144,7 +150,7 @@ function renderPlaylists() {
       : `<div class="sidecap">${S.albums.length ? "No matches." : "No favorite albums yet. Open an album and press Favorite."}</div>`;
     return;
   }
-  $("#playlists").innerHTML = S.playlists.filter(p => !f || fold(p.title).includes(f)).map(p => {
+  $("#playlists").innerHTML = recentEntry(f) + S.playlists.filter(p => !f || fold(p.title).includes(f)).map(p => {
     const n = String(p.count ?? "").match(/\d[\d.,]*/);
     return `<button class="pl${p.id === S.plId ? " active" : ""}" data-id="${esc(p.id)}"><span class="t">${esc(p.title)}</span><span class="n">${n ? esc(n[0]) : ""}</span></button>`;
   }).join("");
@@ -232,6 +238,8 @@ addEventListener("popstate", e => {
 
 const isPage = id => /^(MPRE|UC|MPLA)/.test(id);   // album and artist pages, which have a header and are not in the playlist list
 async function openPlaylist(id, full = false) {
+  if (id === "recent") return showRecent();
+  endSelect();
   S.plId = id; store.set("last", id);
   pushNav(id);
   if (!isPage(id)) showHero(null);
@@ -365,6 +373,7 @@ function showSearch() {
   const r = S.results;
   if (!r) return;
   S.seq++;
+  endSelect();
   S.plId = "search";
   pushNav("search");
   showHero(null);
@@ -486,13 +495,14 @@ function render() {
   const src = S.scope === "all" ? (S.allTracks || []) : S.tracks;
   const list = (terms.length ? src.filter(t => terms.every(x => t._h.includes(x))) : src.slice()).sort(SORTS[S.sort]);
   S.view = list;
+  if (S.sel.size) { const here = new Set(src.map(selKey)); for (const k of S.sel) if (!here.has(k)) S.sel.delete(k); }
   const shown = list.slice(0, LIMIT);
   const over = list.length > shown.length ? `, showing the first ${shown.length}` : "";
   $("#count").textContent = terms.length ? `${list.length} of ${src.length} songs${over}` : `${src.length} songs${over}`;
   const all = S.scope === "all", lk = S.liked;
   $("#rows").innerHTML = shown.length ? shown.map((t, i) => `
-    <div class="row${t.ok ? "" : " off"}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
-      <span class="idx"><span class="num">${t.n}</span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+    <div class="row${t.ok ? "" : " off"}${S.sel.has(selKey(t)) ? " selected" : ""}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
+      <span class="idx"><span class="num">${t.n}</span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><input type="checkbox" class="pick" tabindex="-1" aria-label="Select"${S.sel.has(selKey(t)) ? " checked" : ""}></span>
       <img class="art" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(t.art, 96))}">
       <span class="main"><span class="title">${hl(t.title, terms)}</span><span class="sub">${artistsHtml(t, terms)}</span></span>
       <span class="alb">${all ? hl(t.pl, terms) : t.album ? `<span class="albtxt" title="Go to this album">${hl(t.album, terms)}</span>` : ""}</span>
@@ -505,6 +515,8 @@ function render() {
   paintSugg();
   markPlaying();
   focusRow();
+  paintSel();
+  updateHeadActions();
 }
 
 /* ---------- suggested songs at the end of a playlist (not on albums, artists or search) ---------- */
@@ -602,6 +614,7 @@ $("#tracks").addEventListener("click", e => {
   const mb = e.target.closest(".rowmenu");
   if (mb) { if (t) { if (!menu.hidden && mAnchor === mb) closeMenu(); else mainMenu(t, mb); } return; }
   if (e.target.closest(".star")) { if (t) toggleLike(t); return; }
+  if (t && row.closest("#rows") && (S.selecting || e.ctrlKey || e.metaKey || e.shiftKey)) { e.preventDefault(); pickRow(row, t, e.shiftKey); return; }
   if (t && t.ok) startQueue(rowList(row), t);
 });
 $("#tracks").addEventListener("keydown", e => {
@@ -631,37 +644,48 @@ function startQueue(list, t) {
   playPos(S.order.indexOf(idx));
 }
 /* Slot a song in right after the current one, whatever the shuffle order is. A copy, so a song queued twice stays two entries. */
-function playNext(t) { enqueue(t, S.pos + 1, `“${t.title}” will play next`); }
-function addToQueue(t) { enqueue(t, S.order.length, `Added “${t.title}” to the queue`); }
-function enqueue(t, at, msg) {
-  if (!t || !t.ok) return;
-  if (!S.order.length) { startQueue([t], t); return; }
-  S.queue.push({ ...t });
-  S.order.splice(at, 0, S.queue.length - 1);
+function playNext(t) { enqueue([t], S.pos + 1, `“${t.title}” will play next`); }
+function addToQueue(t) { enqueue([t], S.order.length, `Added “${t.title}” to the queue`); }
+function enqueue(list, at, msg) {
+  list = list.filter(t => t && t.ok);
+  if (!list.length) return;
+  if (!S.order.length) { startQueue(list, list[0]); return; }
+  const first = S.queue.length;
+  S.queue.push(...list.map(t => ({ ...t })));   // copies, so a song queued twice stays two entries
+  S.order.splice(at, 0, ...list.map((_, i) => first + i));
   preloadNext(0);
+  saveQueue();
   if (!queuePanel.hidden) showQueue();
   toast(msg);
 }
 
-/* ---------- remember what was playing, so the next start shows it again ---------- */
-let savedAt = 0;
+/* ---------- remember what was playing, the queue and what played recently ---------- */
+const slim = t => { const { id, title, artists, artistList, album, albumId, duration, art, type, pid } = t; return { id, title, artists, artistList, album, albumId, duration, art, type, pid, ok: true }; };
+let savedAt = 0, histTimer;
 function saveNow(force) {
-  if (!S.order.length || !S.cur || (!force && Date.now() - savedAt < 4000)) return;   // nothing started this time: keep what is saved
+  if (S.restored || !S.order.length || !S.cur || (!force && Date.now() - savedAt < 4000)) return;   // nothing started this time: keep what is saved
   savedAt = Date.now();
-  const { id, title, artists, artistList, album, albumId, duration, art, type } = S.cur;
-  store.set("now", { t: { id, title, artists, artistList, album, albumId, duration, art, type, ok: true }, at: Math.floor(audio.currentTime) || 0 });
+  store.set("now", { t: slim(S.cur), at: Math.floor(audio.currentTime) || 0 });
+}
+function saveQueue() { store.set("queue", upNext().slice(0, 300).map(x => slim(x.t))); }
+function noteHistory(t) {
+  const h = store.get("history", []).filter(x => x.id !== t.id);
+  h.unshift(slim(t));
+  store.set("history", h.slice(0, 100));
 }
 function restoreNow() {
   const n = store.get("now", null);
   if (!n || !n.t || !n.t.id) return;
-  S.cur = n.t; S.resume = { id: n.t.id, at: n.at || 0 };
+  const up = store.get("queue", []).filter(x => x && x.id);
+  S.queue = [n.t, ...up]; S.order = S.queue.map((_, i) => i); S.pos = 0; S.cur = n.t;
+  S.restored = true; S.resume = { id: n.t.id, at: n.at || 0 };
   showNowPlaying(n.t);
   if (n.at > 2 && n.t.duration) { seek.value = n.at / n.t.duration * 1000; paint(seek); $("#tcur").textContent = fmt(n.at); }
 }
 addEventListener("pagehide", () => saveNow(true));
 function playPos(pos) {
   if (pos < 0 || pos >= S.order.length) return;
-  S.pos = pos;
+  S.pos = pos; S.restored = false;
   const t = S.cur = S.queue[S.order[pos]];
   if (spare._id === t.id && spare.getAttribute("src") && !spare._failed) {
     // this song was already loading in the spare player: swap, so it starts at once
@@ -681,7 +705,11 @@ function playPos(pos) {
   markPlaying();
   preloadNext();
   saveNow(true);
+  saveQueue();
+  clearTimeout(histTimer);
+  histTimer = setTimeout(() => noteHistory(t), 8000);   // only songs that got past the first seconds
   if (!queuePanel.hidden) showQueue();
+  if (!lyricsPanel.hidden) showLyrics();
 }
 function next() {
   if (!S.order.length) return;
@@ -701,9 +729,10 @@ function prev() {
   else audio.currentTime = 0;
 }
 function togglePlay() {
-  if (S.cur && !S.order.length) {   // the song from last time, shown but not loaded yet: queue the list it is in, if it is on screen
-    const same = S.view.find(x => x.ok && x.id === S.cur.id);
-    startQueue(same ? S.view : [S.cur], same || S.cur);
+  if (S.restored) {   // the song from last time, shown but not loaded yet
+    S.restored = false;
+    const same = S.order.length === 1 && S.view.find(x => x.ok && x.id === S.cur.id);   // no saved queue: use the list it is in, if it is on screen
+    if (same) startQueue(S.view, same); else playPos(S.pos);
     return;
   }
   if (!S.cur) {
@@ -811,6 +840,7 @@ on("timeupdate", () => {
   $("#tcur").textContent = fmt(audio.currentTime);
   $("#tdur").textContent = fmt(d);
   saveNow();
+  syncLyrics();
   if ("mediaSession" in navigator && d && isFinite(audio.duration)) {
     try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(audio.currentTime, d), playbackRate: audio.playbackRate }); } catch { /* not supported */ }
   }
@@ -836,6 +866,7 @@ on("playing", () => {
 });
 on("pause", showPlayState);
 on("ended", () => {
+  if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); return; }
   if (S.repeat === "one") { audio.currentTime = 0; audio.play().catch(() => {}); } else next();
 });
 on("error", async () => {
@@ -906,6 +937,7 @@ document.addEventListener("keydown", e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if (e.key === "Escape" && !menu.hidden) { const a = mAnchor; closeMenu(); a.focus(); return; }
+  if (e.key === "Escape" && S.selecting && !typing) { endSelect(); return; }
   if (e.key === "Escape" && e.target.id === "q") { e.target.value = ""; S.q = ""; render(); return; }
   if (typing) return;
   switch (e.key) {
@@ -915,6 +947,7 @@ document.addEventListener("keydown", e => {
     case "s": toggleShuffle(); break;
     case "r": cycleRepeat(); break;
     case "l": likeCurrent(); break;
+    case "q": toggleQueue(); break;
     case "/": e.preventDefault(); $("#q").focus(); $("#q").select(); break;
     case "ArrowRight": audio.currentTime += 5; break;
     case "ArrowLeft": audio.currentTime = Math.max(0, audio.currentTime - 5); break;
@@ -1084,7 +1117,8 @@ async function addMenu() {
   const lists = S.playlists.filter(p => p.id !== "LM");
   showMenu(head + `<div class="cap">Add “${esc(t.title)}” to:</div>` + (lists.length ? lists.map(p => has.has(p.id)
     ? `<button role="menuitem" data-act="go" data-pl="${esc(p.id)}" title="Already added. Click to jump to the song"><span class="t">${esc(p.title)}</span><span class="n">✓ already added</span></button>`
-    : `<button role="menuitem" data-act="addto" data-pl="${esc(p.id)}"><span class="t">${esc(p.title)}</span></button>`).join("") : '<div class="cap">No playlists yet.</div>'));
+    : `<button role="menuitem" data-act="addto" data-pl="${esc(p.id)}"><span class="t">${esc(p.title)}</span></button>`).join("") : '<div class="cap">No playlists yet.</div>')
+    + `<hr><button role="menuitem" data-act="addnew">${ICON_ADD}<span class="t">New playlist…</span></button>`);
   menu.querySelector('[data-act="addto"]')?.focus();
 }
 async function addToPlaylist(t, pid) {
@@ -1201,6 +1235,7 @@ menu.addEventListener("click", e => {
   else if (act === "goartist") openPage(b.dataset.id);
   else if (act === "addpl") addMenu();
   else if (act === "addto") addToPlaylist(t, b.dataset.pl);
+  else if (act === "addnew") { closeMenu(); newPlaylist([t]); }
   else if (act === "find") findMenu();
   else if (act === "back") mainMenu(t, mAnchor);
   else if (act === "remove") confirmRemove();
@@ -1239,9 +1274,463 @@ addEventListener("resize", () => { if (!menu.hidden) placeMenu(); });
 })();
 
 /* tells the server this window is still open (when started with "Onion Player.vbs" it stops itself after the window closes) */
-const ping = () => fetch("/api/ping").catch(() => {});
+const PAGE = Math.random().toString(36).slice(2);
+const ping = () => fetch("/api/ping?p=" + PAGE).catch(() => {});
 ping();
 setInterval(ping, 20000);
+addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/closing?p=" + PAGE); } catch { /* the server stops later anyway */ } });
+
+/* ---------- small dialogs: a name, a choice, a confirmation ---------- */
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+function ask({ title, message = "", input = null, choices = null, ok = "OK", cancel = "Cancel", danger = false, body = null, onBody = null }) {
+  return new Promise(resolve => {
+    const d = $("#dlg"), inp = $("#dlginput"), okb = $("#dlgok"), list = $("#dlgchoices"), bodyEl = $("#dlgbody");
+    $("#dlgtitle").textContent = title;
+    $("#dlgmsg").textContent = message; $("#dlgmsg").hidden = !message;
+    inp.hidden = input === null;
+    if (input) { inp.value = input.value || ""; inp.placeholder = input.placeholder || ""; }
+    list.hidden = !choices;
+    list.innerHTML = choices ? choices.map((c, i) => `<button type="button" class="choice" data-i="${i}">${esc(c.label)}</button>`).join("") : "";
+    bodyEl.hidden = !body; bodyEl.innerHTML = body || "";
+    okb.hidden = !!choices; okb.textContent = ok; okb.classList.toggle("danger", danger);
+    $("#dlgcancel").textContent = cancel;
+    let result = null;
+    const done = v => { result = v; d.close(); };
+    list.onclick = e => { const b = e.target.closest(".choice"); if (b) done(choices[+b.dataset.i].value); };
+    $("#dlgform").onsubmit = e => { e.preventDefault(); if (input !== null && !inp.value.trim()) { inp.focus(); return; } done(input !== null ? inp.value.trim() : true); };
+    $("#dlgcancel").onclick = () => done(null);
+    d.onclose = () => resolve(result);   // Esc closes it too
+    d.showModal();
+    if (onBody) onBody(bodyEl);
+    (input !== null ? inp : choices ? list.querySelector(".choice") || okb : okb).focus();
+    if (input !== null) inp.select();
+  });
+}
+
+/* ---------- your playlists: new, rename, delete ---------- */
+const ownedPl = id => !!id && id !== "LM" && S.playlists.some(p => p.id === id);
+async function newPlaylist(songs = [], name = "") {
+  const title = await ask({ title: songs.length ? `New playlist with ${songs.length === 1 ? "this song" : songs.length + " songs"}` : "New playlist", input: { value: name, placeholder: "Playlist name" }, ok: "Create" });
+  if (!title) return null;
+  try {
+    const r = await post("/api/playlist/create", { title, ids: songs.map(t => t.id).filter(Boolean) });
+    S.playlists.splice(Math.min(1, S.playlists.length), 0, r);
+    S.allTracks = null;
+    renderPlaylists();
+    toast(`Created “${title}”${songs.length ? ` with ${songs.length} ${songs.length === 1 ? "song" : "songs"}` : ""}`);
+    return r;
+  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't create it: ${e.message}`); return null; }
+}
+$("#newpl").onclick = async () => {
+  const r = await newPlaylist();
+  if (r) { S.scope = "one"; syncScopeButtons(); S.sig = ""; openPlaylist(r.id); }
+};
+$("#plrename").onclick = async () => {
+  const p = S.playlists.find(x => x.id === S.plId);
+  if (!p) return;
+  const title = await ask({ title: "Rename playlist", input: { value: p.title }, ok: "Rename" });
+  if (!title || title === p.title) return;
+  try {
+    await post("/api/playlist/rename", { playlist: p.id, title });
+    p.title = title; S.allTracks = null;
+    $("#plname").textContent = title;
+    renderPlaylists();
+    toast("Renamed");
+  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't rename it: ${e.message}`); }
+};
+$("#pldelete").onclick = async () => {
+  const p = S.playlists.find(x => x.id === S.plId);
+  if (!p) return;
+  if (!await ask({ title: `Delete “${p.title}”?`, message: "It is deleted in YouTube Music too. This can't be undone from here.", ok: "Delete", danger: true })) return;
+  try {
+    await post("/api/playlist/delete", { playlist: p.id });
+    S.playlists = S.playlists.filter(x => x.id !== p.id); S.allTracks = null; S.sig = "";
+    toast(`Deleted “${p.title}”`);
+    openPlaylist("LM");
+  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't delete it: ${e.message}`); }
+};
+
+/* what the buttons in the page header show for the page you are on */
+let dupMemo = null;
+function dupsOf(tracks) {
+  if (dupMemo && dupMemo.tracks === tracks) return dupMemo.res;
+  const byId = new Map();
+  for (const t of tracks) if (t.id) { if (!byId.has(t.id)) byId.set(t.id, []); byId.get(t.id).push(t); }
+  const exact = [...byId.values()].filter(g => g.length > 1);   // the very same song, twice or more
+  const names = new Map();   // different entries that look like the same song (another album, a remaster)
+  for (const g of byId.values()) {
+    const k = fold(g[0].title) + "|" + fold(g[0].artists);
+    if (!names.has(k)) names.set(k, []);
+    names.get(k).push(g[0]);
+  }
+  const maybe = [...names.values()].filter(g => g.length > 1);
+  dupMemo = { tracks, res: { exact, maybe } };
+  return dupMemo.res;
+}
+function updateHeadActions() {
+  const owned = ownedPl(S.plId) && S.scope === "one";
+  $("#plrename").hidden = $("#pldelete").hidden = !owned;
+  $("#clearhist").hidden = S.plId !== "recent";
+  $("#sync").hidden = S.plId === "recent";
+  let n = 0;
+  if (owned) { const { exact, maybe } = dupsOf(S.tracks); n = [...exact, ...maybe].reduce((a, g) => a + g.length - 1, 0); }
+  $("#pldups").hidden = !n;
+  $("#pldups").textContent = `Duplicates (${n})`;
+}
+
+/* ---------- duplicates ---------- */
+function applyRemoved(pid, list) {
+  const gone = new Set(list);
+  S.allTracks = null;
+  if (S.plId === pid && S.sig.startsWith(pid + ":")) {
+    S.tracks = S.tracks.filter(x => !gone.has(x)).map((x, i) => prep(x, i + 1, "", 0, pid));
+    S.sig = pid + ":" + S.tracks.map(x => x.id).join();
+    $("#plmeta").textContent = `${S.tracks.length} songs, checked ${when(Date.now() / 1000)}`;
+  }
+  const meta = S.playlists.find(p => p.id === pid);
+  if (meta && /\d/.test(String(meta.count ?? ""))) { meta.count = String(Math.max(0, (parseInt(String(meta.count).replace(/\D/g, ""), 10) || 0) - list.length)); renderPlaylists(); }
+  render();
+}
+async function removeTracks(pid, list) {
+  try {
+    const r = await post("/api/removemany", { playlist: pid, items: list.map(t => ({ id: t.id, sid: t.sid || null, pos: t.n })) });
+    applyRemoved(pid, list);
+    return r.removed;
+  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't remove: ${e.message}`); return 0; }
+}
+async function showDups() {
+  const pid = S.plId;
+  const paint = body => {
+    const { exact, maybe } = dupsOf(S.tracks);
+    if (!exact.length && !maybe.length) { $("#dlg").close(); return; }
+    const copy = (t, keep) => `<div class="dcopy"><span class="dpos">#${t.n}</span><span class="dtxt">${esc(t.album || "No album")}${t.duration ? " · " + fmt(t.duration) : ""}</span>${keep ? '<span class="dkeep">keep</span>' : `<button type="button" class="ghost dx" data-k="${esc(selKey(t))}">Remove</button>`}</div>`;
+    const grp = g => `<div class="dgroup"><div class="dname">${esc(g[0].title)} <span class="dby">${esc(g[0].artists)}</span></div>${g.map((t, i) => copy(t, i === 0)).join("")}</div>`;
+    body.innerHTML = (exact.length ? `<div class="dcap">The same song more than once</div>${exact.map(grp).join("")}` : "")
+      + (maybe.length ? `<div class="dcap">Might be the same song (another version)</div>${maybe.map(grp).join("")}` : "");
+    const n = exact.reduce((a, g) => a + g.length - 1, 0), okb = $("#dlgok");
+    okb.hidden = !n;
+    okb.textContent = `Remove ${n} extra ${n === 1 ? "copy" : "copies"} of the same song`;
+  };
+  const go = await ask({ title: "Duplicates", message: "The first copy of each song stays.", ok: "Remove", cancel: "Close", body: " ", onBody: body => {
+    paint(body);
+    body.onclick = async e => {
+      const b = e.target.closest(".dx");
+      if (!b) return;
+      const t = S.tracks.find(x => selKey(x) === b.dataset.k);
+      if (!t) return;
+      b.disabled = true;
+      if (await removeTracks(pid, [t])) paint(body); else b.disabled = false;
+    };
+  } });
+  if (!go) return;
+  const extras = dupsOf(S.tracks).exact.flatMap(g => g.slice(1));
+  const n = extras.length && await removeTracks(pid, extras);
+  if (n) toast(`Removed ${n} extra ${n === 1 ? "copy" : "copies"}`);
+}
+$("#pldups").onclick = showDups;
+
+/* ---------- selecting several songs ---------- */
+const selKey = t => (t.pid || "") + "|" + (t.id || "") + "|" + t.n;
+function paintSel() {
+  $("#tracks").classList.toggle("selecting", S.selecting);
+  $("#selectbtn").setAttribute("aria-pressed", String(S.selecting));
+  $("#selbar").hidden = !S.selecting;
+  document.querySelectorAll("#rows .row").forEach(r => {
+    const t = S.view[+r.dataset.i], on = !!t && S.sel.has(selKey(t));
+    r.classList.toggle("selected", on);
+    const c = r.querySelector(".pick");
+    if (c) c.checked = on;
+  });
+  const n = S.sel.size;
+  $("#selcount").textContent = n ? `${n} selected` : "Click songs to select them";
+  $("#selbar").querySelectorAll("[data-sel]").forEach(b => { b.disabled = !n && ["next", "queue", "add", "remove"].includes(b.dataset.sel); });
+  $("#selremove").hidden = !(ownedPl(S.plId) && S.scope === "one");
+}
+function endSelect() { S.selecting = false; S.sel.clear(); S.lastPick = null; paintSel(); }
+function pickRow(row, t, range) {
+  const i = +row.dataset.i;
+  if (range && S.lastPick !== null) {
+    const [a, b] = [S.lastPick, i].sort((x, y) => x - y);
+    for (let k = a; k <= b; k++) if (S.view[k]) S.sel.add(selKey(S.view[k]));
+  } else {
+    const k = selKey(t);
+    if (S.sel.has(k)) S.sel.delete(k); else S.sel.add(k);
+  }
+  S.lastPick = i;
+  S.selecting = true;   // starting with Ctrl or Shift click turns select mode on
+  paintSel();
+}
+$("#selectbtn").onclick = () => { if (S.selecting) endSelect(); else { S.selecting = true; paintSel(); } };
+async function addManyTo(list) {
+  const lists = S.playlists.filter(p => p.id !== "LM" && p.id !== S.plId);
+  const n = list.length;
+  const pid = await ask({ title: `Add ${n} ${n === 1 ? "song" : "songs"} to`, choices: [...lists.map(p => ({ label: p.title, value: p.id })), { label: "New playlist…", value: "" }] });
+  if (pid === null) return;
+  if (pid === "") { if (await newPlaylist(list)) endSelect(); return; }
+  const pl = S.playlists.find(p => p.id === pid);
+  try {
+    const r = await post("/api/addmany", { playlist: pid, tracks: list.map(slim) });
+    S.allTracks = null;
+    if (pl && /\d/.test(String(pl.count ?? ""))) { pl.count = String((parseInt(String(pl.count).replace(/\D/g, ""), 10) || 0) + r.added); renderPlaylists(); }
+    toast(r.added ? `Added ${r.added} ${r.added === 1 ? "song" : "songs"} to “${pl ? pl.title : "the playlist"}”${r.skipped ? `, ${r.skipped} already there` : ""}` : "They are all in that playlist already");
+    endSelect();
+  } catch (e) { if (e.status === 401) onApiError(e); else toast(`Couldn't add them: ${e.message}`); }
+}
+$("#selbar").onclick = async e => {
+  const b = e.target.closest("[data-sel]");
+  if (!b || b.disabled) return;
+  const list = S.view.filter(t => S.sel.has(selKey(t))), n = list.length, word = n === 1 ? "song" : "songs";
+  switch (b.dataset.sel) {
+    case "all":
+      if (S.sel.size >= S.view.length) S.sel.clear(); else S.view.forEach(t => S.sel.add(selKey(t)));
+      paintSel(); break;
+    case "done": endSelect(); break;
+    case "next": enqueue(list, S.pos + 1, `${n} ${word} will play next`); endSelect(); break;
+    case "queue": enqueue(list, S.order.length, `Added ${n} ${word} to the queue`); endSelect(); break;
+    case "add": await addManyTo(list); break;
+    case "remove": {
+      const pl = S.playlists.find(p => p.id === S.plId);
+      if (!await ask({ title: `Remove ${n} ${word}?`, message: `They are removed from “${pl ? pl.title : "the playlist"}” in YouTube Music too.`, ok: "Remove", danger: true })) break;
+      const done = await removeTracks(S.plId, list);
+      if (done) { toast(`Removed ${done} ${done === 1 ? "song" : "songs"}`); endSelect(); }
+      break;
+    }
+  }
+};
+
+/* ---------- recently played ---------- */
+function showRecent() {
+  S.seq++;
+  endSelect();
+  S.plId = "recent";
+  pushNav("recent");
+  showHero(null);
+  $("#suggbox").hidden = true;
+  $("#side").classList.remove("open");
+  const h = store.get("history", []);
+  $("#plname").textContent = "Recently played";
+  $("#plmeta").textContent = `${h.length} ${h.length === 1 ? "song" : "songs"}, newest first`;
+  S.sig = "recent:" + h.map(t => t.id).join();
+  S.tracks = h.map((t, i) => prep(t, i + 1, "", 0, "recent"));
+  S.q = ""; $("#q").value = "";
+  render();
+  $("#tracks").scrollTop = 0;
+  renderPlaylists();
+}
+$("#clearhist").onclick = async () => {
+  if (!await ask({ title: "Clear recently played?", ok: "Clear", danger: true })) return;
+  store.set("history", []);
+  showRecent();
+};
+
+/* ---------- popups next to the player bar ---------- */
+function placeAbove(panel, btn) {
+  const r = btn.getBoundingClientRect();
+  panel.style.top = "auto";
+  panel.style.bottom = (innerHeight - r.top + 8) + "px";
+  panel.style.left = Math.max(8, Math.min(r.left, innerWidth - panel.offsetWidth - 8)) + "px";
+}
+
+/* ---------- sleep timer ---------- */
+const sleepBtn = $("#sleepbtn"), sleepPanel = $("#sleeppanel");
+let sleepTimer = null, sleepAt = 0;
+function updateSleep() {
+  const on = !!(S.sleepEnd || sleepAt);
+  sleepBtn.setAttribute("aria-pressed", String(on));
+  sleepBtn.title = on ? `Sleep timer: stops ${S.sleepEnd ? "after this song" : `in about ${Math.max(1, Math.round((sleepAt - Date.now()) / 60000))} min`}` : "Sleep timer";
+}
+function sleepOff() { clearTimeout(sleepTimer); sleepTimer = null; sleepAt = 0; S.sleepEnd = false; updateSleep(); }
+function setSleep(min) {
+  sleepOff();
+  if (min === "end") S.sleepEnd = true;
+  else if (min) { sleepAt = Date.now() + min * 60000; sleepTimer = setTimeout(() => { sleepOff(); audio.pause(); toast("Sleep timer: paused"); }, min * 60000); }
+  updateSleep();
+  toast(min === "end" ? "Will stop after this song" : min ? `Will pause in ${min} minutes` : "Sleep timer off");
+}
+setInterval(updateSleep, 30000);
+function closeSleep() { sleepPanel.hidden = true; sleepBtn.setAttribute("aria-expanded", "false"); }
+sleepBtn.onclick = () => {
+  if (!sleepPanel.hidden) return closeSleep();
+  closeQueue(); closeLyrics();
+  const on = !!(S.sleepEnd || sleepAt);
+  sleepPanel.innerHTML = '<div class="cap">Pause playback</div>'
+    + [15, 30, 45, 60].map(m => `<button role="menuitem" data-m="${m}"><span class="t">In ${m} minutes</span></button>`).join("")
+    + '<button role="menuitem" data-m="end"><span class="t">After this song</span></button>'
+    + (on ? '<hr><button role="menuitem" data-m="0" class="danger"><span class="t">Turn off the timer</span></button>' : "");
+  sleepPanel.hidden = false;
+  placeAbove(sleepPanel, sleepBtn);
+  sleepBtn.setAttribute("aria-expanded", "true");
+  sleepPanel.querySelector("button")?.focus();
+};
+sleepPanel.addEventListener("click", e => {
+  const b = e.target.closest("button[data-m]");
+  if (!b) return;
+  closeSleep();
+  setSleep(b.dataset.m === "end" ? "end" : +b.dataset.m);
+});
+document.addEventListener("pointerdown", e => { if (!sleepPanel.hidden && !sleepPanel.contains(e.target) && !sleepBtn.contains(e.target)) closeSleep(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !sleepPanel.hidden) { closeSleep(); sleepBtn.focus(); } });
+
+/* ---------- lyrics ---------- */
+const lyricsPanel = $("#lyricspanel"), lyricsBody = $("#lyricsbody"), lyricsBtn = $("#lyricsbtn");
+let lyricsTimed = null, lyricsAt = -1, lyricsFor = null;
+async function showLyrics() {
+  const t = S.cur;
+  lyricsTimed = null; lyricsAt = -1;
+  $("#lyricstitle").textContent = t ? `${t.title} · ${t.artists}` : "Lyrics";
+  if (!t || !t.id) { lyricsBody.innerHTML = '<div class="cap">Play a song to see its lyrics.</div>'; return; }
+  lyricsFor = t.id;
+  lyricsBody.innerHTML = '<div class="cap">Looking…</div>';
+  let d = {};
+  try { d = await api(`/api/lyrics/${encodeURIComponent(t.id)}`); }
+  catch (e) { if (lyricsFor === t.id && !lyricsPanel.hidden) lyricsBody.innerHTML = `<div class="cap">Couldn't look them up: ${esc(e.message)}</div>`; return; }
+  if (lyricsFor !== t.id || lyricsPanel.hidden) return;
+  const src = d.source ? `<div class="lysrc">${esc(d.source)}</div>` : "";
+  if (d.lines) {
+    lyricsTimed = d.lines;
+    lyricsBody.innerHTML = d.lines.map((l, i) => `<p class="ly" data-i="${i}">${esc(l.text) || "&nbsp;"}</p>`).join("") + src;
+    syncLyrics();
+  } else if (d.text) lyricsBody.innerHTML = `<p class="lytext">${esc(d.text)}</p>` + src;
+  else lyricsBody.innerHTML = '<div class="cap">No lyrics found for this song.</div>';
+}
+function syncLyrics() {
+  if (!lyricsTimed || lyricsPanel.hidden) return;
+  const ms = audio.currentTime * 1000;
+  let i = -1;
+  for (let k = 0; k < lyricsTimed.length && lyricsTimed[k].t <= ms; k++) i = k;
+  if (i === lyricsAt) return;
+  lyricsAt = i;
+  lyricsBody.querySelector(".ly.on")?.classList.remove("on");
+  const p = lyricsBody.querySelector(`.ly[data-i="${i}"]`);
+  if (p) { p.classList.add("on"); p.scrollIntoView({ block: "center", behavior: "smooth" }); }
+}
+function closeLyrics() { lyricsPanel.hidden = true; lyricsBtn.setAttribute("aria-pressed", "false"); }
+lyricsBtn.onclick = () => {
+  if (!lyricsPanel.hidden) return closeLyrics();
+  closeQueue(); closeSleep();
+  lyricsPanel.hidden = false;
+  lyricsBtn.setAttribute("aria-pressed", "true");
+  showLyrics();
+};
+$("#lyricsclose").onclick = closeLyrics;
+lyricsBody.addEventListener("click", e => {
+  const p = e.target.closest(".ly");
+  if (p && lyricsTimed) audio.currentTime = lyricsTimed[+p.dataset.i].t / 1000;
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !lyricsPanel.hidden && menu.hidden) closeLyrics(); });
+
+/* ---------- show the playing song in its list ---------- */
+$("#locatebtn").onclick = async () => {
+  const t = S.cur;
+  if (!t) return toast("Nothing is playing.");
+  if (S.view.some(x => x.id === t.id)) { S.focus = { id: t.id, at: Date.now() }; render(); return; }
+  if (t.pid && S.playlists.some(p => p.id === t.pid)) return jumpTo(t.pid, t.id);
+  try {
+    const d = await api(`/api/where/${encodeURIComponent(t.id)}`);
+    if (d.playlists.length) return jumpTo(d.playlists[0].id, t.id);
+  } catch { /* fall through to the message */ }
+  toast("This song isn't in any of your saved playlists.");
+};
+
+/* ---------- the queue: what plays after the current song ---------- */
+const queuePanel = $("#queuepanel"), queueBtn = $("#queuebtn");
+const ICON_SHUFFLE = '<svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>';
+const upNext = () => S.order.slice(S.pos + 1).map((qi, k) => ({ t: S.queue[qi], at: S.pos + 1 + k }));
+function reshuffle() {
+  const rest = S.order.splice(S.pos + 1);   // what is still to come; the song playing and the ones before it stay
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  S.order.push(...rest);
+  preloadNext(0);
+  saveQueue();
+  showQueue();
+  toast("Shuffled what's left");
+}
+function saveQueueAsPlaylist() {
+  const songs = [S.cur, ...upNext().map(x => x.t)].filter(t => t && t.ok);
+  closeQueue();
+  if (!songs.length) return toast("The queue is empty.");
+  newPlaylist(songs, `Queue ${new Date().toLocaleDateString()}`);
+}
+function showQueue() {
+  const keep = queuePanel.querySelector(".qlist")?.scrollTop || 0;
+  const list = upNext(), cur = S.cur;
+  const now = cur ? `<div class="cap">Now playing</div><div class="qrow now"><span class="t">${esc(cur.title)}<small>${esc(cur.artists)}</small></span></div>` : "";
+  const rows = list.slice(0, 200).map(({ t, at }) => `<div class="qrow" draggable="true" data-at="${at}">
+      <button class="qplay" title="Play now. Drag to move"><span class="t">${esc(t.title)}<small>${esc(t.artists)}</small></span></button>
+      <button class="ib qtop" title="Move to the top" aria-label="Move to the top"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4zm8 4-7 7h5v5h4v-5h5z"/></svg></button>
+      <button class="ib qdel" title="Remove from the queue" aria-label="Remove from the queue"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+    </div>`).join("");
+  const acts = (S.shuffle && list.length > 1 ? `<button class="qshuffle" data-a="reshuffle" title="Shuffle the songs that are left">${ICON_SHUFFLE}<span>Reshuffle</span></button>` : "")
+    + (cur ? `<button class="qshuffle" data-a="save" title="Save the queue as a playlist">${ICON_ADD}<span>Save</span></button>` : "");
+  queuePanel.innerHTML = `<div class="qhead"><span>Queue</span><span class="qacts">${acts}</span></div><div class="qlist">${now}<div class="cap">Up next${list.length ? ` (${list.length})` : ""}</div>`
+    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>') + "</div>";
+  queuePanel.querySelector(".qlist").scrollTop = keep;
+}
+function openQueue() {
+  closeMenu(); closeSleep(); closeLyrics();
+  showQueue();
+  queuePanel.hidden = false;
+  queueBtn.setAttribute("aria-expanded", "true");
+}
+function closeQueue() { queuePanel.hidden = true; queueBtn.setAttribute("aria-expanded", "false"); }
+function toggleQueue() { if (queuePanel.hidden) openQueue(); else closeQueue(); }
+queueBtn.onclick = toggleQueue;
+queuePanel.addEventListener("click", e => {
+  const a = e.target.closest(".qshuffle");
+  if (a) return a.dataset.a === "save" ? saveQueueAsPlaylist() : reshuffle();
+  const row = e.target.closest(".qrow[data-at]");
+  if (!row) return;
+  const at = +row.dataset.at;
+  if (e.target.closest(".qdel")) {
+    S.order.splice(at, 1);
+    preloadNext(0);
+  } else if (e.target.closest(".qtop")) {
+    S.order.splice(S.pos + 1, 0, ...S.order.splice(at, 1));
+    preloadNext(0);
+  } else if (e.target.closest(".qplay")) { playPos(at); return; }
+  saveQueue();
+  showQueue();
+});
+/* drag a song to a new place in the queue */
+let dragFrom = null;
+const dropSide = (row, e) => { const b = row.getBoundingClientRect(); return e.clientY > b.top + b.height / 2; };
+const clearDrop = () => queuePanel.querySelectorAll(".drop-above, .drop-below, .dragging").forEach(r => r.classList.remove("drop-above", "drop-below", "dragging"));
+queuePanel.addEventListener("dragstart", e => {
+  const row = e.target.closest(".qrow[data-at]");
+  if (!row) return;
+  dragFrom = +row.dataset.at;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", String(dragFrom));
+  row.classList.add("dragging");
+});
+queuePanel.addEventListener("dragover", e => {
+  const row = e.target.closest(".qrow[data-at]");
+  if (dragFrom === null || !row) return;
+  e.preventDefault();
+  queuePanel.querySelectorAll(".drop-above, .drop-below").forEach(r => r.classList.remove("drop-above", "drop-below"));
+  row.classList.add(dropSide(row, e) ? "drop-below" : "drop-above");
+});
+queuePanel.addEventListener("drop", e => {
+  const row = e.target.closest(".qrow[data-at]");
+  if (dragFrom === null || !row) return;
+  e.preventDefault();
+  let to = +row.dataset.at + (dropSide(row, e) ? 1 : 0);
+  const [moved] = S.order.splice(dragFrom, 1);
+  if (dragFrom < to) to--;
+  S.order.splice(to, 0, moved);
+  dragFrom = null;
+  preloadNext(0);
+  saveQueue();
+  showQueue();
+});
+queuePanel.addEventListener("dragend", () => { dragFrom = null; clearDrop(); });
+document.addEventListener("pointerdown", e => {
+  if (!queuePanel.hidden && !queuePanel.contains(e.target) && !queueBtn.contains(e.target)) closeQueue();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !queuePanel.hidden) { closeQueue(); queueBtn.focus(); } });
 
 /* ---------- start ---------- */
 vol.value = store.get("vol", 80);
@@ -1256,59 +1745,3 @@ restoreNow();
   } catch (e) { toast("Can't reach the Onion server. Is the console window still open?"); }
 })();
 
-/* ---------- the queue: what plays after the current song ---------- */
-const queuePanel = $("#queuepanel"), queueBtn = $("#queuebtn");
-const ICON_SHUFFLE = '<svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>';
-const upNext = () => S.order.slice(S.pos + 1).map((qi, k) => ({ t: S.queue[qi], at: S.pos + 1 + k }));
-function reshuffle() {
-  const rest = S.order.splice(S.pos + 1);   // what is still to come; the song playing and the ones before it stay
-  for (let i = rest.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
-  }
-  S.order.push(...rest);
-  preloadNext(0);
-  showQueue();
-  toast("Shuffled what's left");
-}
-function showQueue() {
-  const keep = queuePanel.querySelector(".qlist")?.scrollTop || 0;
-  const list = upNext(), cur = S.cur;
-  const now = cur ? `<div class="cap">Now playing</div><div class="qrow now"><span class="t">${esc(cur.title)}<small>${esc(cur.artists)}</small></span></div>` : "";
-  const rows = list.slice(0, 200).map(({ t, at }) => `<div class="qrow" data-at="${at}">
-      <button class="qplay" title="Play now"><span class="t">${esc(t.title)}<small>${esc(t.artists)}</small></span></button>
-      <button class="ib qtop" title="Move to the top" aria-label="Move to the top"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4zm8 4-7 7h5v5h4v-5h5z"/></svg></button>
-      <button class="ib qdel" title="Remove from the queue" aria-label="Remove from the queue"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
-    </div>`).join("");
-  const reshuffleBtn = S.shuffle && list.length > 1
-    ? `<button class="qshuffle" title="Shuffle the songs that are left">${ICON_SHUFFLE}<span>Reshuffle</span></button>` : "";
-  queuePanel.innerHTML = `<div class="qhead"><span>Queue</span>${reshuffleBtn}</div><div class="qlist">${now}<div class="cap">Up next${list.length ? ` (${list.length})` : ""}</div>`
-    + (rows || '<div class="cap">Nothing queued. Use “Play next” or “Add to queue” in a song’s menu.</div>') + "</div>";
-  queuePanel.querySelector(".qlist").scrollTop = keep;
-}
-function openQueue() {
-  closeMenu();
-  showQueue();
-  queuePanel.hidden = false;
-  queueBtn.setAttribute("aria-expanded", "true");
-}
-function closeQueue() { queuePanel.hidden = true; queueBtn.setAttribute("aria-expanded", "false"); }
-queueBtn.onclick = () => { if (queuePanel.hidden) openQueue(); else closeQueue(); };
-queuePanel.addEventListener("click", e => {
-  if (e.target.closest(".qshuffle")) return reshuffle();
-  const row = e.target.closest(".qrow[data-at]");
-  if (!row) return;
-  const at = +row.dataset.at;
-  if (e.target.closest(".qdel")) {
-    S.order.splice(at, 1);
-    preloadNext(0);
-  } else if (e.target.closest(".qtop")) {
-    S.order.splice(S.pos + 1, 0, ...S.order.splice(at, 1));
-    preloadNext(0);
-  } else if (e.target.closest(".qplay")) { playPos(at); return; }
-  showQueue();
-});
-document.addEventListener("pointerdown", e => {
-  if (!queuePanel.hidden && !queuePanel.contains(e.target) && !queueBtn.contains(e.target)) closeQueue();
-});
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !queuePanel.hidden) { closeQueue(); queueBtn.focus(); } });

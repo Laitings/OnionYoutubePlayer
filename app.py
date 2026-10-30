@@ -799,6 +799,23 @@ def remove(body: RemoveBody):
     return {"ok": True}
 
 
+def track_entry(vid: str, t: dict, sid) -> dict:
+    """A song as the saved copy of a playlist keeps it, from what the page knew about it."""
+    return {
+        "id": vid,
+        "title": str(t.get("title") or ""),
+        "artists": str(t.get("artists") or ""),
+        "artistList": t.get("artistList") if isinstance(t.get("artistList"), list) else [],
+        "album": str(t.get("album") or ""),
+        "albumId": t.get("albumId") if isinstance(t.get("albumId"), str) else None,
+        "duration": t.get("duration") if isinstance(t.get("duration"), (int, float)) else 0,
+        "art": t.get("art") if isinstance(t.get("art"), str) else None,
+        "ok": True,
+        "type": t.get("type") if isinstance(t.get("type"), str) else None,
+        "sid": sid,
+    }
+
+
 class AddBody(BaseModel):
     playlist: str
     id: str
@@ -827,25 +844,257 @@ def add_to_playlist(body: AddBody):
         raise HTTPException(502, "YouTube Music did not add it. It may already be in the playlist, or the playlist isn't yours.")
     sid = next((r.get("setVideoId") for r in result.get("playlistEditResults") or [] if r), None)
     if cached:
-        t = body.track or {}
-        cached.setdefault("tracks", []).append({
-            "id": vid,
-            "title": str(t.get("title") or ""),
-            "artists": str(t.get("artists") or ""),
-            "artistList": t.get("artistList") if isinstance(t.get("artistList"), list) else [],
-            "album": str(t.get("album") or ""),
-            "albumId": t.get("albumId") if isinstance(t.get("albumId"), str) else None,
-            "duration": t.get("duration") if isinstance(t.get("duration"), (int, float)) else 0,
-            "art": t.get("art") if isinstance(t.get("art"), str) else None,
-            "ok": True,
-            "type": t.get("type") if isinstance(t.get("type"), str) else None,
-            "sid": sid,
-        })
+        cached.setdefault("tracks", []).append(track_entry(vid, body.track or {}, sid))
         if isinstance(cached.get("count"), int):
             cached["count"] += 1
         write_cache(pid, cached)
     print(f"added {vid} to {pid}")
     return {"ok": True, "sid": sid}
+
+
+def edit_listing(change) -> None:
+    """Changes the saved list of playlists (the sidebar) without downloading it again."""
+    data = read_cache("_playlists")
+    if data and isinstance(data.get("playlists"), list):
+        change(data["playlists"])
+        write_cache("_playlists", data)
+
+
+def own_playlist(pid: str) -> str:
+    safe_id(pid)
+    if pid == "LM" or is_album(pid) or is_artist(pid):
+        raise HTTPException(400, "That one can't be changed like this.")
+    return pid
+
+
+def succeeded(result) -> bool:
+    return "SUCCEEDED" in str(result.get("status", "") if isinstance(result, dict) else result).upper()
+
+
+class AddManyBody(BaseModel):
+    playlist: str
+    tracks: list[dict]
+
+
+@app.post("/api/addmany")
+def add_many(body: AddManyBody):
+    """Adds several songs to the end of one of your playlists. Songs already in it are skipped."""
+    pid = own_playlist(body.playlist)
+    cached = read_cache(pid)
+    have = {t.get("id") for t in (cached or {}).get("tracks") or []}
+    picked: dict[str, dict] = {}
+    for t in body.tracks[:500]:
+        vid = t.get("id")
+        if isinstance(vid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", vid) and vid not in have and vid not in picked:
+            picked[vid] = t
+    if not picked:
+        return {"added": 0, "skipped": len(body.tracks), "sids": {}}
+    ids = list(picked)
+    try:
+        with _yt_lock:
+            result = get_yt().add_playlist_items(pid, ids, duplicates=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"add many failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not (isinstance(result, dict) and succeeded(result)):
+        print(f"add many refused ({pid}): {str(result)[:300]}")
+        raise HTTPException(502, "YouTube Music did not add them. The playlist may not be yours.")
+    sids: dict[str, str | None] = {}
+    for i, r in enumerate(result.get("playlistEditResults") or []):
+        if isinstance(r, dict):
+            sids[r.get("videoId") or (ids[i] if i < len(ids) else "")] = r.get("setVideoId")
+    if cached:
+        for vid, t in picked.items():
+            cached.setdefault("tracks", []).append(track_entry(vid, t, sids.get(vid)))
+        if isinstance(cached.get("count"), int):
+            cached["count"] += len(picked)
+        write_cache(pid, cached)
+    print(f"added {len(picked)} songs to {pid}")
+    return {"added": len(picked), "skipped": len(body.tracks) - len(picked), "sids": sids}
+
+
+class RemoveManyBody(BaseModel):
+    playlist: str
+    items: list[dict]   # {id, sid, pos} for each song
+
+
+@app.post("/api/removemany")
+def remove_many(body: RemoveManyBody):
+    """Removes several songs from one of your playlists, in YouTube Music too."""
+    pid = own_playlist(body.playlist)
+    items = [i for i in body.items[:500] if isinstance(i, dict) and isinstance(i.get("id"), str)]
+    if any(not i.get("sid") for i in items):
+        # saved before entry ids were remembered: download the playlist again to get them
+        try:
+            data = fetch_playlist(pid, None)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise api_error(exc)
+        write_cache(pid, data)
+        tracks, used = data["tracks"], set()
+        for i in items:
+            if i.get("sid"):
+                continue
+            pos = i.get("pos")
+            k = pos - 1 if isinstance(pos, int) and 1 <= pos <= len(tracks) and tracks[pos - 1].get("id") == i["id"] and pos - 1 not in used \
+                else next((n for n, t in enumerate(tracks) if t.get("id") == i["id"] and n not in used), None)
+            if k is not None:
+                used.add(k)
+                i["sid"] = tracks[k].get("sid")
+    send = [{"videoId": i["id"], "setVideoId": i["sid"]} for i in items if i.get("sid")]
+    if not send:
+        raise HTTPException(400, "YouTube Music doesn't allow removing these from here. Remove them in YouTube Music.")
+    try:
+        with _yt_lock:
+            result = get_yt().remove_playlist_items(pid, send)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"remove many failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not succeeded(result):
+        print(f"remove many refused ({pid}): {str(result)[:300]}")
+        raise HTTPException(502, "YouTube Music did not remove them: " + str(result)[:200])
+    gone = {x["setVideoId"] for x in send}
+    data = read_cache(pid)
+    if data:
+        before = len(data.get("tracks") or [])
+        data["tracks"] = [t for t in data.get("tracks") or [] if t.get("sid") not in gone]
+        if isinstance(data.get("count"), int):
+            data["count"] = max(0, data["count"] - (before - len(data["tracks"])))
+        write_cache(pid, data)
+    print(f"removed {len(send)} songs from {pid}")
+    return {"removed": len(send), "skipped": len(items) - len(send)}
+
+
+# ---------------------------------------------------------------- your own playlists: create, rename, delete
+
+class CreateBody(BaseModel):
+    title: str
+    ids: list[str] = []
+
+
+@app.post("/api/playlist/create")
+def create_playlist(body: CreateBody):
+    title = body.title.strip()[:150]
+    if not title:
+        raise HTTPException(400, "Give the playlist a name.")
+    ids = list(dict.fromkeys(i for i in body.ids[:1000] if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", i or "")))
+    try:
+        with _yt_lock:
+            result = get_yt().create_playlist(title, "", video_ids=ids or None)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"create playlist failed: {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not isinstance(result, str) or not re.fullmatch(r"[A-Za-z0-9_-]{5,80}", result):
+        print(f"create playlist refused: {str(result)[:300]}")
+        raise HTTPException(502, "YouTube Music did not create the playlist: " + str(result)[:200])
+    entry = {"id": result, "title": title, "count": str(len(ids))}
+    edit_listing(lambda items: items.insert(min(1, len(items)), entry))
+    print(f"created playlist {result} with {len(ids)} songs")
+    return entry
+
+
+class RenameBody(BaseModel):
+    playlist: str
+    title: str
+
+
+@app.post("/api/playlist/rename")
+def rename_playlist(body: RenameBody):
+    pid, title = own_playlist(body.playlist), body.title.strip()[:150]
+    if not title:
+        raise HTTPException(400, "Give the playlist a name.")
+    try:
+        with _yt_lock:
+            result = get_yt().edit_playlist(pid, title=title)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"rename failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not succeeded(result):
+        raise HTTPException(502, "YouTube Music did not rename it. The playlist may not be yours.")
+    def retitle(items):
+        for p in items:
+            if p.get("id") == pid:
+                p["title"] = title
+    edit_listing(retitle)
+    data = read_cache(pid)
+    if data:
+        data["title"] = title
+        write_cache(pid, data)
+    return {"ok": True, "title": title}
+
+
+class DeleteBody(BaseModel):
+    playlist: str
+
+
+@app.post("/api/playlist/delete")
+def delete_playlist(body: DeleteBody):
+    pid = own_playlist(body.playlist)
+    try:
+        with _yt_lock:
+            result = get_yt().delete_playlist(pid)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"delete failed ({pid}): {exc.__class__.__name__}: {str(exc)[:300]}")
+        raise api_error(exc)
+    if not succeeded(result):
+        raise HTTPException(502, "YouTube Music did not delete it. The playlist may not be yours.")
+    edit_listing(lambda items: items.__setitem__(slice(None), [p for p in items if p.get("id") != pid]))
+    cache_path(pid).unlink(missing_ok=True)
+    print(f"deleted playlist {pid}")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- lyrics
+
+_lyrics: dict[str, dict] = {}
+_timed_lyrics = True   # tried first; switched off if YouTube refuses it
+
+
+@app.get("/api/lyrics/{video_id}")
+def lyrics(video_id: str):
+    """Lyrics for a song, with timestamps when YouTube Music has them: {lines: [{t, text}]}, or {text}, or {}."""
+    global _timed_lyrics
+    safe_id(video_id)
+    if video_id in _lyrics:
+        return _lyrics[video_id]
+    out: dict = {}
+    try:
+        with _yt_lock:
+            browse = get_yt().get_watch_playlist(video_id, limit=1).get("lyrics")
+            data = None
+            if browse and _timed_lyrics:
+                try:
+                    data = get_yt().get_lyrics(browse, timestamps=True)
+                except Exception:
+                    _timed_lyrics = False   # YouTube refuses the timed kind for this login: plain lyrics only from now on
+            if browse and not data:
+                data = get_yt().get_lyrics(browse)
+        if data and data.get("lyrics"):
+            if data.get("hasTimestamps"):
+                out = {"lines": [{"t": l.start_time, "text": l.text} for l in data["lyrics"]]}
+            else:
+                out = {"text": str(data["lyrics"])}
+            out["source"] = str(data.get("source") or "")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"lyrics failed ({video_id}): {exc.__class__.__name__}: {str(exc)[:200]}")
+        return {}   # not cached, so a later try can work
+    if len(_lyrics) > 200:
+        _lyrics.clear()
+    _lyrics[video_id] = out
+    return out
 
 
 _where_cache: dict[str, tuple[float, str, dict]] = {}   # playlist id -> (file time, title, {song id: first position})
@@ -1096,30 +1345,54 @@ def save_window(body: WindowBody):
 # ---------------------------------------------------------------- stop when the window is closed
 
 AUTO_QUIT = bool(os.environ.get("ONION_AUTOQUIT"))   # set by "Onion Player.vbs", not by run.bat
-QUIT_AFTER = 180    # seconds without a sign of life from the page
-_last_ping = time.monotonic()
+QUIT_AFTER = 180    # seconds without a sign of life from a page that never said goodbye (a crash, or the computer slept)
+CLOSE_GRACE = 8     # seconds after the last page said goodbye: long enough for a reload to come back
+_pages: dict[str, float] = {}   # open pages and when each last pinged
+_empty_since = time.monotonic()
 _seen_ping = False
 
 
 @app.get("/api/ping")
-def ping():
-    global _last_ping, _seen_ping
-    _last_ping = time.monotonic()
+def ping(p: str = ""):
+    global _seen_ping, _empty_since
+    _pages[p[:40] or "-"] = time.monotonic()
     _seen_ping = True
+    _empty_since = None
+    return {"ok": True}
+
+
+@app.post("/api/closing")
+def closing(p: str = ""):
+    """The page is going away (window closed, or reloading: then it pings again at once)."""
+    global _empty_since
+    _pages.pop(p[:40] or "-", None)
+    if not _pages:
+        _empty_since = time.monotonic()
     return {"ok": True}
 
 
 def watch_for_close() -> None:
-    global _last_ping
+    global _empty_since
     last_tick = time.monotonic()
     while True:
-        time.sleep(15)
+        time.sleep(3)
         now = time.monotonic()
-        if now - last_tick > 60:   # the computer was asleep: give the page time to wake up and ping again
-            _last_ping = now
+        if now - last_tick > 30:   # the computer was asleep: give the pages time to wake up and ping again
+            for k in _pages:
+                _pages[k] = now
+            if _empty_since is not None:
+                _empty_since = now
         last_tick = now
-        limit = QUIT_AFTER if _seen_ping else 600   # never opened at all: give up after 10 minutes
-        if now - _last_ping > limit:
+        for k, seen in list(_pages.items()):
+            if now - seen > QUIT_AFTER:
+                del _pages[k]
+        if _pages:
+            _empty_since = None
+            continue
+        if _empty_since is None:
+            _empty_since = now
+        limit = CLOSE_GRACE if _seen_ping else 600   # never opened at all: give up after 10 minutes
+        if now - _empty_since > limit:
             print("The window was closed, stopping.")
             os._exit(0)
 

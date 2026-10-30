@@ -1,6 +1,6 @@
 Option Explicit
 ' Starts Onion Player without a console window and opens it in its own app window (no address bar or tabs).
-' The server stops by itself a few minutes after you close that window.
+' The server stops by itself a few seconds after you close that window.
 
 Dim sh, fso, dir, py, url, port, i, tries, browser, candidates
 
