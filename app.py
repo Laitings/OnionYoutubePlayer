@@ -1125,7 +1125,16 @@ def watch_for_close() -> None:
 
 
 # Registered last, so the /api routes above win.
-app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")
+class FreshStaticFiles(StaticFiles):
+    """The browser asks again before reusing a page, script or style, so an update shows up after a restart."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", FreshStaticFiles(directory=BASE / "static", html=True), name="static")
 
 
 if __name__ == "__main__":
