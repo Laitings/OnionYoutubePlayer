@@ -91,6 +91,24 @@ def play(ip: str, url: str, title: str = "", position: float = 0) -> None:
                 break
 
 
+def set_group(ips: list[str], removed: list[str]) -> None:
+    """The first speaker leads. The others join it, so they play in sync; the removed ones leave and stop."""
+    lead = speaker(ips[0])
+    if lead.group.coordinator.ip_address != lead.ip_address:
+        lead.unjoin()
+    for ip in ips[1:]:
+        dev = speaker(ip)
+        if dev.group.coordinator.ip_address != lead.ip_address:
+            dev.join(lead)
+    for ip in removed:
+        dev = speaker(ip)
+        dev.unjoin()
+        try:
+            dev.stop()
+        except Exception:
+            pass
+
+
 def command(ip: str, cmd: str, value=None) -> None:
     dev = speaker(ip)
     coord = dev.group.coordinator

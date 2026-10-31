@@ -1563,6 +1563,19 @@ async def sonos_cmd(req: SonosCmd):
     return {"ok": True}
 
 
+class SonosGroup(BaseModel):
+    ips: list[str]
+    removed: list[str] = []
+
+
+@app.post("/api/sonos/group")
+async def sonos_group(req: SonosGroup):
+    if not req.ips:
+        raise HTTPException(400, "Pick at least one speaker")
+    await run_in_threadpool(sonos_call, sonos_cast.set_group, req.ips, req.removed)
+    return {"ok": True}
+
+
 @app.get("/api/sonos/state")
 async def sonos_state(ip: str):
     return await run_in_threadpool(sonos_call, sonos_cast.state, ip)

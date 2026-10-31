@@ -5,7 +5,7 @@ let audio = A1, spare = A2;   // two players: one plays while the other preloads
 const both = f => [A1, A2].forEach(f);
 const on = (evt, fn) => both(el => el.addEventListener(evt, e => { if (el === audio) fn(e); }));   // only the active player counts
 both(el => el.addEventListener("error", () => { el._failed = true; }));
-const cast = { ip: "", name: "", id: "", playing: false, heard: false, since: 0, nudge: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
+const cast = { ip: "", ips: [], name: "", id: "", playing: false, heard: false, since: 0, nudge: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
 const streamUrl = t => `/api/audio/${encodeURIComponent(t.id)}`;
 const LIMIT = 2500;   // most rows drawn at once; search narrows it down
 
@@ -1759,7 +1759,11 @@ $("#mutebtn").onclick = () => setMuted(!muted);
 
 /* ---------- Sonos: the speaker plays, this page keeps its own (silent) player running as the clock ---------- */
 const castBtn = $("#castbtn"), castPanel = $("#castpanel");
-const castCmd = (cmd, value) => post("/api/sonos/cmd", { ip: cast.ip, cmd, value }).catch(e => { toast(e.message); });
+const castCmd = (cmd, value) => {
+  // volume and mute belong to each speaker; everything else goes through the leader
+  const to = cmd === "volume" || cmd === "mute" ? cast.ips.map(s => s.ip) : [cast.ip];
+  return Promise.all(to.map(ip => post("/api/sonos/cmd", { ip, cmd, value }))).catch(e => { toast(e.message); });
+};
 function castShow() {
   castBtn.setAttribute("aria-pressed", String(!!cast.ip));
   castBtn.title = cast.ip ? `Playing on ${cast.name} (click to change)` : "Play on Sonos";
@@ -1818,39 +1822,54 @@ async function castPoll() {
   } catch { /* a missed answer is fine, the next poll tries again */ }
   cast.busy = false;
 }
-function castStart(sp) {
-  castStop(true);
-  Object.assign(cast, { ip: sp.ip, name: sp.name, id: "", playing: false, heard: false });
-  both(el => { el.muted = true; });
-  cast.timer = setInterval(castPoll, 2000);
+function castNames() { return cast.ips.map(s => s.name).join(" + "); }
+async function castSetSpeakers(ips) {
+  // The first speaker leads; the others are grouped with it in Sonos, so they play in sync.
+  const old = cast.ips;
+  if (!ips.length) return castStop(false);
+  if (!old.length) {
+    castStop(true);
+    Object.assign(cast, { ip: ips[0].ip, ips, name: "", id: "", playing: false, heard: false });
+    both(el => { el.muted = true; });
+    cast.timer = setInterval(castPoll, 2000);
+  }
+  const leaderChanged = old.length && old[0].ip !== ips[0].ip;
+  cast.ips = ips; cast.ip = ips[0].ip; cast.name = castNames();
   castShow();
+  try {
+    await post("/api/sonos/group", { ips: ips.map(s => s.ip), removed: old.filter(o => !ips.some(s => s.ip === o.ip)).map(s => s.ip) });
+  } catch (e) { toast(e.message); }
   castVolume();
-  toast(`Playing on ${sp.name}`);
-  if (!audio.paused) castSync();
+  if (leaderChanged) { cast.id = ""; cast.heard = false; }   // another speaker leads now: start the song there, at this position
+  if (!old.length || leaderChanged) { if (!audio.paused) castSync(); }
 }
 function castStop(silent) {
   if (!cast.ip) return;
-  const ip = cast.ip;
+  const ips = cast.ips.map(s => s.ip);
   clearInterval(cast.timer);
-  post("/api/sonos/cmd", { ip, cmd: "pause" }).catch(() => {});
-  cast.ip = ""; cast.id = ""; cast.playing = false;
+  post("/api/sonos/cmd", { ip: ips[0], cmd: "pause" }).catch(() => {});
+  if (ips.length > 1) post("/api/sonos/group", { ips: [ips[0]], removed: ips.slice(1) }).catch(() => {});
+  cast.ip = ""; cast.ips = []; cast.id = ""; cast.playing = false;
   both(el => { el.muted = muted; });
   castShow();
   if (!silent) toast("Playing on this computer again");
 }
 function closeCast() { castPanel.hidden = true; castBtn.setAttribute("aria-expanded", "false"); }
+let castList = [];
+function drawCast() {
+  castPanel.innerHTML = '<div class="cap">Play on… (pick one or more)</div>'
+    + (cast.ip ? '<button role="menuitem" data-ip=""><span class="t">This computer</span></button>' : "")
+    + castList.map(s => `<button role="menuitemcheckbox" aria-checked="${cast.ips.some(x => x.ip === s.ip)}" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}"><span class="t">${cast.ips.some(x => x.ip === s.ip) ? "✓ " : ""}${esc(s.name)}</span></button>`).join("")
+    + (castList.length ? "" : '<div class="cap">No Sonos speakers found on this network.</div>')
+    + '<hr><button role="menuitem" data-refresh="1"><span class="t">Search again</span></button>';
+  placeAbove(castPanel, castBtn);
+}
 async function openCast(refresh) {
   castPanel.innerHTML = '<div class="cap">Play on…</div><div class="cap">Looking for speakers…</div>';
   castPanel.hidden = false; placeAbove(castPanel, castBtn); castBtn.setAttribute("aria-expanded", "true");
-  let speakers = [];
-  try { speakers = (await api("/api/sonos/speakers" + (refresh ? "?refresh=1" : ""))).speakers; }
+  try { castList = (await api("/api/sonos/speakers" + (refresh ? "?refresh=1" : ""))).speakers; }
   catch (e) { castPanel.innerHTML = `<div class="cap">${esc(e.message)}</div>`; placeAbove(castPanel, castBtn); return; }
-  castPanel.innerHTML = '<div class="cap">Play on…</div>'
-    + (cast.ip ? '<button role="menuitem" data-ip=""><span class="t">This computer</span></button>' : "")
-    + speakers.map(s => `<button role="menuitem" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}"><span class="t">${s.ip === cast.ip ? "✓ " : ""}${esc(s.name)}</span></button>`).join("")
-    + (speakers.length ? "" : '<div class="cap">No Sonos speakers found on this network.</div>')
-    + '<hr><button role="menuitem" data-refresh="1"><span class="t">Search again</span></button>';
-  placeAbove(castPanel, castBtn);
+  drawCast();
   castPanel.querySelector("button")?.focus();
 }
 castBtn.onclick = () => {
@@ -1858,13 +1877,17 @@ castBtn.onclick = () => {
   closeQueue(); closeLyrics(); closeSleep();
   openCast(false);
 };
-castPanel.addEventListener("click", e => {
+castPanel.addEventListener("click", async e => {
   const b = e.target.closest("button");
   if (!b) return;
   if (b.dataset.refresh) return openCast(true);
-  closeCast();
-  if (b.dataset.ip === "") { const t = audio.currentTime; castStop(false); audio.currentTime = t; }
-  else castStart({ ip: b.dataset.ip, name: b.dataset.name });
+  if (b.dataset.ip === "") { closeCast(); const t = audio.currentTime; castStop(false); audio.currentTime = t; return; }
+  const ip = b.dataset.ip;
+  const ips = cast.ips.some(s => s.ip === ip) ? cast.ips.filter(s => s.ip !== ip) : [...cast.ips, { ip, name: b.dataset.name }];
+  const t = audio.currentTime;
+  await castSetSpeakers(ips);
+  if (!ips.length) audio.currentTime = t;
+  drawCast();
 });
 document.addEventListener("pointerdown", e => { if (!castPanel.hidden && !castPanel.contains(e.target) && !castBtn.contains(e.target)) closeCast(); });
 
