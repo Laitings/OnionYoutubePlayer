@@ -15,6 +15,7 @@ TOKEN = secrets.token_urlsafe(16)   # part of the audio URL, so only things we t
 
 _speakers: dict[str, object] = {}   # ip -> SoCo
 _found_at = 0.0
+_active: set[str] = set()   # speakers we started, so they can be paused when the player closes
 
 
 def hms_to_seconds(text) -> float:
@@ -78,6 +79,7 @@ def speaker(ip: str):
 
 def play(ip: str, url: str, title: str = "", position: float = 0) -> None:
     dev = speaker(ip).group.coordinator
+    _active.add(ip)
     dev.play_uri(url, title=title or "Onion Player")
     if position and position > 2:
         # the speaker needs a moment to load the stream before it accepts a seek
@@ -94,6 +96,7 @@ def play(ip: str, url: str, title: str = "", position: float = 0) -> None:
 def set_group(ips: list[str], removed: list[str]) -> None:
     """The first speaker leads. The others join it, so they play in sync; the removed ones leave and stop."""
     lead = speaker(ips[0])
+    _active.update(ips)
     if lead.group.coordinator.ip_address != lead.ip_address:
         lead.unjoin()
     for ip in ips[1:]:
@@ -107,6 +110,16 @@ def set_group(ips: list[str], removed: list[str]) -> None:
             dev.stop()
         except Exception:
             pass
+
+
+def stop_all() -> None:
+    """Pause everything we started (the player is closing)."""
+    for ip in list(_active):
+        try:
+            _speakers[ip].group.coordinator.pause()
+        except Exception:
+            pass
+    _active.clear()
 
 
 def command(ip: str, cmd: str, value=None) -> None:

@@ -1811,6 +1811,7 @@ def watch_for_close() -> None:
         limit = CLOSE_GRACE if _seen_ping else 600   # never opened at all: give up after 10 minutes
         if now - _empty_since > limit:
             print("The window was closed, stopping.")
+            sonos_cast.stop_all()
             os._exit(0)
 
 

@@ -686,7 +686,11 @@ function restoreNow() {
   showNowPlaying(n.t);
   if (n.at > 2 && n.t.duration) { seek.value = n.at / n.t.duration * 1000; paint(seek); $("#tcur").textContent = fmt(n.at); }
 }
-addEventListener("pagehide", () => saveNow(true));
+addEventListener("pagehide", () => {
+  saveNow(true);
+  // closing or reloading the page loses the link to the speakers, so do not leave them playing on their own
+  if (cast.ip) navigator.sendBeacon("/api/sonos/cmd", new Blob([JSON.stringify({ ip: cast.ip, cmd: "pause" })], { type: "application/json" }));
+});
 function playPos(pos) {
   if (pos < 0 || pos >= S.order.length) return;
   S.pos = pos; S.restored = false;
