@@ -7,6 +7,7 @@ functions; the rest is plain helpers that the tests cover.
 import re
 import secrets
 import socket
+import threading
 import time
 
 PLAYABLE = {"m4a", "mp4", "aac", "mp3", "flac"}   # what a Sonos can decode; WebM/Opus it cannot
@@ -15,7 +16,22 @@ TOKEN = secrets.token_urlsafe(16)   # part of the audio URL, so only things we t
 
 _speakers: dict[str, object] = {}   # ip -> SoCo
 _found_at = 0.0
+_locks: dict[str, threading.Lock] = {}   # one request at a time per speaker: they drop connections when flooded
 _active: set[str] = set()   # speakers we started, so they can be paused when the player closes
+
+
+def _lock(ip: str) -> threading.Lock:
+    return _locks.setdefault(ip, threading.Lock())
+
+
+def _retry(fn, tries: int = 2):
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception:
+            if i == tries - 1:
+                raise
+            time.sleep(0.4)
 
 
 def hms_to_seconds(text) -> float:
@@ -58,6 +74,7 @@ def discover(force: bool = False) -> list[dict]:
     global _found_at
     if force or time.time() - _found_at > DISCOVER_TTL or not _speakers:
         import soco
+        soco.config.REQUEST_TIMEOUT = 6.0   # fail fast instead of hanging for a long time
         found = soco.discover(timeout=4, allow_network_scan=True) or set()
         _speakers.clear()
         for dev in found:
@@ -125,10 +142,11 @@ def stop_all() -> None:
 def command(ip: str, cmd: str, value=None) -> None:
     dev = speaker(ip)
     if cmd in ("volume", "mute"):   # these belong to the one speaker: no need to look up the group (a slow speaker would fail that)
-        if cmd == "volume":
-            dev.volume = max(0, min(100, int(value)))
-        else:
-            dev.mute = bool(value)
+        with _lock(ip):
+            if cmd == "volume":
+                _retry(lambda: setattr(dev, "volume", max(0, min(100, int(value)))))
+            else:
+                _retry(lambda: setattr(dev, "mute", bool(value)))
         return
     coord = dev.group.coordinator
     if cmd == "play":
@@ -148,12 +166,11 @@ def volumes(ips: list[str]) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
     def one(ip):
-        for _ in range(2):
-            try:
-                return ip, _speakers[ip].volume
-            except Exception:
-                time.sleep(0.3)
-        return ip, None
+        try:
+            with _lock(ip):
+                return ip, _retry(lambda: _speakers[ip].volume)
+        except Exception:
+            return ip, None
 
     known = [ip for ip in ips if ip in _speakers]
     with ThreadPoolExecutor(max_workers=max(1, len(known))) as pool:
@@ -169,6 +186,6 @@ def state(ip: str, ips: list[str] | None = None) -> dict:
         "pos": hms_to_seconds(info.get("position")),
         "dur": hms_to_seconds(info.get("duration")),
         "id": track_id_from_uri(info.get("uri")),
-        "volumes": volumes(ips or [ip]),
+        "volumes": volumes(ips) if ips else {},
         "muted": dev.mute,
     }
