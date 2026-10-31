@@ -151,5 +151,6 @@ def state(ip: str) -> dict:
         "dur": hms_to_seconds(info.get("duration")),
         "id": track_id_from_uri(info.get("uri")),
         "volume": dev.volume,
+        "volumes": {m.ip_address: m.volume for m in coord.group.members if m.is_visible},
         "muted": dev.mute,
     }

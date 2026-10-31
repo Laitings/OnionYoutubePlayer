@@ -5,7 +5,7 @@ let audio = A1, spare = A2;   // two players: one plays while the other preloads
 const both = f => [A1, A2].forEach(f);
 const on = (evt, fn) => both(el => el.addEventListener(evt, e => { if (el === audio) fn(e); }));   // only the active player counts
 both(el => el.addEventListener("error", () => { el._failed = true; }));
-const cast = { ip: "", ips: [], name: "", id: "", playing: false, heard: false, since: 0, nudge: false, changing: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
+const cast = { ip: "", ips: [], name: "", id: "", playing: false, heard: false, since: 0, nudge: false, changing: false, levels: {}, mix: {}, volAt: 0, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
 const streamUrl = t => `/api/audio/${encodeURIComponent(t.id)}`;
 const LIMIT = 2500;   // most rows drawn at once; search narrows it down
 
@@ -1799,10 +1799,33 @@ function castSeeked() {
   if (cast.nudge) { cast.nudge = false; return; }
   castCmd("seek", audio.currentTime);
 }
-function castVolume() {
+/* Each speaker has its own level. The main slider is the loudest speaker; moving it scales all of them, keeping their balance (cast.mix, 0 to 1 against the loudest). */
+function castLevels(volumes, redraw = true) {
+  const lv = {};
+  cast.ips.forEach(s => { if (volumes && typeof volumes[s.ip] === "number") lv[s.ip] = volumes[s.ip]; else if (typeof cast.levels[s.ip] === "number") lv[s.ip] = cast.levels[s.ip]; });
+  cast.levels = lv;
+  const top = Math.max(0, ...Object.values(lv));
+  if (top > 0) Object.keys(lv).forEach(ip => { cast.mix[ip] = lv[ip] / top; });
+  vol.value = top; paint(vol); store.set("vol", top); miniSync();
+  if (redraw) castShowLevels();
+}
+function castShowLevels() {
+  castPanel.querySelectorAll(".spvol").forEach(el => { const v = cast.levels[el.dataset.ip]; if (typeof v === "number" && document.activeElement !== el) { el.value = v; paint(el); } });
+}
+const castSend = {};
+function castSetLevel(ip, v) {
+  cast.levels[ip] = v; cast.volAt = Date.now();
+  clearTimeout(castSend[ip]);
+  castSend[ip] = setTimeout(() => post("/api/sonos/cmd", { ip, cmd: "volume", value: v }).catch(e => toast(e.message)), 120);
+}
+function castVolume() {   // the main slider moved
   if (!cast.ip) return;
-  clearTimeout(cast.volTimer);
-  cast.volTimer = setTimeout(() => { cast.volTimer = null; castCmd("volume", +vol.value); }, 120);
+  const m = +vol.value;
+  cast.ips.forEach(s => castSetLevel(s.ip, Math.round((cast.mix[s.ip] ?? 1) * m)));
+  castShowLevels();
+}
+async function castReadLevels() {
+  try { castLevels((await api(`/api/sonos/state?ip=${encodeURIComponent(cast.ip)}`)).volumes); } catch { /* keep what we know */ }
 }
 async function castPoll() {
   if (!cast.ip || cast.busy || cast.changing || !cast.id) return;
@@ -1822,9 +1845,9 @@ async function castPoll() {
       else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
       else next();
     }
-    if (!cast.volTimer && Math.abs(st.volume - +vol.value) > 1) { vol.value = st.volume; paint(vol); store.set("vol", st.volume); }
+    if (Date.now() - cast.volAt > 3000) castLevels(st.volumes);   // changed in the Sonos app?
   } catch { /* a missed answer is fine, the next poll tries again */ }
-  cast.busy = false;
+  finally { cast.busy = false; }
 }
 function castNames() { return cast.ips.map(s => s.name).join(" + "); }
 async function castSetSpeakers(ips) {
@@ -1846,7 +1869,7 @@ async function castSetSpeakers(ips) {
   } catch (e) { toast(e.message); }
   cast.heard = false;
   cast.changing = false;
-  castVolume();
+  await castReadLevels();
   if (leaderChanged) { cast.id = ""; cast.heard = false; }   // another speaker leads now: start the song there, at this position
   if (!old.length || leaderChanged) { if (!audio.paused) castSync(); }
 }
@@ -1866,11 +1889,20 @@ let castList = [];
 function drawCast() {
   castPanel.innerHTML = '<div class="cap">Play on… (pick one or more)</div>'
     + (cast.ip ? '<button role="menuitem" data-ip=""><span class="t">This computer</span></button>' : "")
-    + castList.map(s => `<button role="menuitemcheckbox" aria-checked="${cast.ips.some(x => x.ip === s.ip)}" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}"><span class="t">${cast.ips.some(x => x.ip === s.ip) ? "✓ " : ""}${esc(s.name)}</span></button>`).join("")
+    + castList.map(s => `<button role="menuitemcheckbox" aria-checked="${cast.ips.some(x => x.ip === s.ip)}" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}"><span class="t">${cast.ips.some(x => x.ip === s.ip) ? "✓ " : ""}${esc(s.name)}</span></button>`
+      + (cast.ips.some(x => x.ip === s.ip) ? `<div class="spv"><input type="range" class="spvol" min="0" max="100" value="${cast.levels[s.ip] ?? 0}" data-ip="${esc(s.ip)}" aria-label="Volume of ${esc(s.name)}"></div>` : "")).join("")
     + (castList.length ? "" : '<div class="cap">No Sonos speakers found on this network.</div>')
     + '<hr><button role="menuitem" data-refresh="1"><span class="t">Search again</span></button>';
+  castPanel.querySelectorAll(".spvol").forEach(paint);
   placeAbove(castPanel, castBtn);
 }
+castPanel.addEventListener("input", e => {
+  const el = e.target.closest(".spvol");
+  if (!el) return;
+  paint(el);
+  castSetLevel(el.dataset.ip, +el.value);
+  castLevels(null, false);   // the main slider follows the loudest speaker
+});
 async function openCast(refresh) {
   castPanel.innerHTML = '<div class="cap">Play on…</div><div class="cap">Looking for speakers…</div>';
   castPanel.hidden = false; placeAbove(castPanel, castBtn); castBtn.setAttribute("aria-expanded", "true");

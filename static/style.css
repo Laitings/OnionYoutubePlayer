@@ -172,6 +172,7 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 .menu .danger, .menu .danger svg { color: #ff9db8; }
 .menu .n { color: var(--faint); font-family: var(--head); font-variant-numeric: tabular-nums; }
 .menu .cap { padding: 6px 12px 8px; color: var(--dim); font-size: 12px; }
+.menu .spv { padding: 0 12px 8px 32px; }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
 #nptitle, #npartist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #nptitle { font-weight: 600; }
