@@ -879,7 +879,11 @@ on("playing", () => {
 on("pause", () => { showPlayState(); castSync(); });
 on("seeked", () => castSeeked());
 on("ended", () => {
-  if (cast.ip) return;   // the speaker decides when a song is over (castPoll)
+  if (cast.ip) {   // the speaker decides when a song is over (castPoll); if it is slow to say so, this page's own clock does
+    const id = audio._id;
+    setTimeout(() => { if (cast.ip && audio._id === id && S.cur && S.cur.id === id) castFinished(); }, 2500);
+    return;
+  }
   if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); return; }
   if (S.repeat === "one") { audio.currentTime = 0; audio.play().catch(() => {}); } else next();
 });
@@ -1794,6 +1798,16 @@ function castSync() {
     }
   }, 150);
 }
+function castFinished() {
+  if (!cast.ip || !cast.playing || castEnding) return;
+  castEnding = true;
+  cast.heard = false;
+  if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); }
+  else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
+  else next();
+  setTimeout(() => { castEnding = false; }, 1500);
+}
+let castEnding = false;
 function castSeeked() {
   if (!cast.ip || !cast.id) return;
   if (cast.nudge) { cast.nudge = false; return; }
@@ -1852,11 +1866,9 @@ async function castPoll() {
       if (!scrubbing && Math.abs(audio.currentTime - st.pos) > 3) { cast.nudge = true; audio.currentTime = st.pos; }
     } else if (st.state === "PAUSED_PLAYBACK" && cast.heard && cast.playing) {
       cast.playing = false; audio.pause();   // paused from the Sonos app
-    } else if (st.state === "STOPPED" && cast.heard && cast.playing && Date.now() - cast.since > 5000 && dur() - audio.currentTime < 10) {   // only near the end: a stop while changing speakers is not "finished"
-      cast.heard = false;   // finished
-      if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); }
-      else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
-      else next();
+    } else if (st.state !== "PLAYING" && st.state !== "TRANSITIONING" && cast.heard && cast.playing && Date.now() - cast.since > 5000
+      && (dur() - audio.currentTime < 10 || (st.dur > 0 && st.dur - st.pos < 10))) {   // only near the end: a stop while changing speakers is not "finished"
+      castFinished();
     }
     if (withVol) castLevels(st.volumes);   // changed in the Sonos app?
   } catch { /* a missed answer is fine, the next poll tries again */ }
