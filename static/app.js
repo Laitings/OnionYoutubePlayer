@@ -5,7 +5,7 @@ let audio = A1, spare = A2;   // two players: one plays while the other preloads
 const both = f => [A1, A2].forEach(f);
 const on = (evt, fn) => both(el => el.addEventListener(evt, e => { if (el === audio) fn(e); }));   // only the active player counts
 both(el => el.addEventListener("error", () => { el._failed = true; }));
-const cast = { ip: "", ips: [], name: "", id: "", playing: false, heard: false, since: 0, nudge: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
+const cast = { ip: "", ips: [], name: "", id: "", playing: false, heard: false, since: 0, nudge: false, changing: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
 const streamUrl = t => `/api/audio/${encodeURIComponent(t.id)}`;
 const LIMIT = 2500;   // most rows drawn at once; search narrows it down
 
@@ -1801,7 +1801,7 @@ function castVolume() {
   cast.volTimer = setTimeout(() => { cast.volTimer = null; castCmd("volume", +vol.value); }, 120);
 }
 async function castPoll() {
-  if (!cast.ip || cast.busy || !cast.id) return;
+  if (!cast.ip || cast.busy || cast.changing || !cast.id) return;
   cast.busy = true;
   try {
     const st = await api(`/api/sonos/state?ip=${encodeURIComponent(cast.ip)}`);
@@ -1812,7 +1812,7 @@ async function castPoll() {
       if (!scrubbing && Math.abs(audio.currentTime - st.pos) > 3) { cast.nudge = true; audio.currentTime = st.pos; }
     } else if (st.state === "PAUSED_PLAYBACK" && cast.heard && cast.playing) {
       cast.playing = false; audio.pause();   // paused from the Sonos app
-    } else if (st.state === "STOPPED" && cast.heard && cast.playing && Date.now() - cast.since > 5000) {
+    } else if (st.state === "STOPPED" && cast.heard && cast.playing && Date.now() - cast.since > 5000 && dur() - audio.currentTime < 10) {   // only near the end: a stop while changing speakers is not "finished"
       cast.heard = false;   // finished
       if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); }
       else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
@@ -1836,9 +1836,12 @@ async function castSetSpeakers(ips) {
   const leaderChanged = old.length && old[0].ip !== ips[0].ip;
   cast.ips = ips; cast.ip = ips[0].ip; cast.name = castNames();
   castShow();
+  cast.changing = true;   // the speakers stop and start while regrouping: do not read that as "song finished"
   try {
     await post("/api/sonos/group", { ips: ips.map(s => s.ip), removed: old.filter(o => !ips.some(s => s.ip === o.ip)).map(s => s.ip) });
   } catch (e) { toast(e.message); }
+  cast.heard = false;
+  cast.changing = false;
   castVolume();
   if (leaderChanged) { cast.id = ""; cast.heard = false; }   // another speaker leads now: start the song there, at this position
   if (!old.length || leaderChanged) { if (!audio.paused) castSync(); }
