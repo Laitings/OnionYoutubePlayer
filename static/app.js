@@ -5,6 +5,7 @@ let audio = A1, spare = A2;   // two players: one plays while the other preloads
 const both = f => [A1, A2].forEach(f);
 const on = (evt, fn) => both(el => el.addEventListener(evt, e => { if (el === audio) fn(e); }));   // only the active player counts
 both(el => el.addEventListener("error", () => { el._failed = true; }));
+const cast = { ip: "", name: "", id: "", playing: false, heard: false, since: 0, nudge: false, timer: null, volTimer: null, busy: false };   // Sonos state, see the Sonos section
 const streamUrl = t => `/api/audio/${encodeURIComponent(t.id)}`;
 const LIMIT = 2500;   // most rows drawn at once; search narrows it down
 
@@ -707,6 +708,7 @@ function playPos(pos) {
   showNowPlaying(t);
   markPlaying();
   preloadNext();
+  castSync();
   saveNow(true);
   saveQueue();
   clearTimeout(histTimer);
@@ -861,7 +863,7 @@ function showPlayState() {
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playing ? "playing" : "paused";
   miniSync();
 }
-on("play", showPlayState);
+on("play", () => { showPlayState(); castSync(); });
 on("waiting", showPlayState);
 on("canplay", showPlayState);
 on("playing", () => {
@@ -870,8 +872,10 @@ on("playing", () => {
   const n = songAt(1);
   if (n && spare._id !== n.id) preloadNext(300);
 });
-on("pause", showPlayState);
+on("pause", () => { showPlayState(); castSync(); });
+on("seeked", () => castSeeked());
 on("ended", () => {
+  if (cast.ip) return;   // the speaker decides when a song is over (castPoll)
   if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); return; }
   if (S.repeat === "one") { audio.currentTime = 0; audio.play().catch(() => {}); } else next();
 });
@@ -925,6 +929,7 @@ $("#repeat").onclick = cycleRepeat;
 function setVolume() {
   both(el => { el.volume = (vol.value / 100) ** 2; });
   paint(vol);
+  castVolume();
   store.set("vol", +vol.value);
   miniSync();
 }
@@ -1739,7 +1744,8 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && !queuePane
 let muted = store.get("muted", false);
 function setMuted(m) {
   muted = !!m;
-  both(el => { el.muted = muted; });
+  both(el => { el.muted = muted || cast.ip !== ""; });
+  if (cast.ip) castCmd("mute", muted ? 1 : 0);
   const b = $("#mutebtn");
   b.setAttribute("aria-pressed", String(muted));
   b.title = muted ? "Unmute (M)" : "Mute (M)";
@@ -1750,6 +1756,117 @@ function setMuted(m) {
   miniSync();
 }
 $("#mutebtn").onclick = () => setMuted(!muted);
+
+/* ---------- Sonos: the speaker plays, this page keeps its own (silent) player running as the clock ---------- */
+const castBtn = $("#castbtn"), castPanel = $("#castpanel");
+const castCmd = (cmd, value) => post("/api/sonos/cmd", { ip: cast.ip, cmd, value }).catch(e => { toast(e.message); });
+function castShow() {
+  castBtn.setAttribute("aria-pressed", String(!!cast.ip));
+  castBtn.title = cast.ip ? `Playing on ${cast.name} (click to change)` : "Play on Sonos";
+}
+let castTimer;
+function castSync() {
+  if (!cast.ip) return;
+  clearTimeout(castTimer);
+  castTimer = setTimeout(async () => {   // a song change pauses and plays within a moment: send only where it ended up
+    if (!cast.ip || !S.cur || S.restored) return;
+    const playing = !audio.paused, id = audio._id || S.cur.id;
+    try {
+      if (id !== cast.id) {
+        if (!playing) return;
+        cast.id = id; cast.playing = true; cast.heard = false; cast.since = Date.now();
+        await post("/api/sonos/play", { ip: cast.ip, id, title: `${S.cur.title} - ${S.cur.artists}`, position: audio.currentTime });
+      } else if (playing !== cast.playing) {
+        cast.playing = playing;
+        await castCmd(playing ? "play" : "pause");
+      }
+    } catch (e) {
+      toast(e.message || "Sonos did not answer");
+      castStop(true);
+    }
+  }, 150);
+}
+function castSeeked() {
+  if (!cast.ip || !cast.id) return;
+  if (cast.nudge) { cast.nudge = false; return; }
+  castCmd("seek", audio.currentTime);
+}
+function castVolume() {
+  if (!cast.ip) return;
+  clearTimeout(cast.volTimer);
+  cast.volTimer = setTimeout(() => { cast.volTimer = null; castCmd("volume", +vol.value); }, 120);
+}
+async function castPoll() {
+  if (!cast.ip || cast.busy || !cast.id) return;
+  cast.busy = true;
+  try {
+    const st = await api(`/api/sonos/state?ip=${encodeURIComponent(cast.ip)}`);
+    if (st.id !== cast.id && cast.playing && Date.now() - cast.since > 8000) { castStop(false); toast(`${cast.name} is playing something else, so Onion Player let go`); return; }
+    if (st.state === "PLAYING" && st.id === cast.id) {
+      cast.heard = true;
+      if (!cast.playing) { cast.playing = true; audio.play().catch(() => {}); }   // resumed from the Sonos app
+      if (!scrubbing && Math.abs(audio.currentTime - st.pos) > 3) { cast.nudge = true; audio.currentTime = st.pos; }
+    } else if (st.state === "PAUSED_PLAYBACK" && cast.heard && cast.playing) {
+      cast.playing = false; audio.pause();   // paused from the Sonos app
+    } else if (st.state === "STOPPED" && cast.heard && cast.playing && Date.now() - cast.since > 5000) {
+      cast.heard = false;   // finished
+      if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); }
+      else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
+      else next();
+    }
+    if (!cast.volTimer && Math.abs(st.volume - +vol.value) > 1) { vol.value = st.volume; paint(vol); store.set("vol", st.volume); }
+  } catch { /* a missed answer is fine, the next poll tries again */ }
+  cast.busy = false;
+}
+function castStart(sp) {
+  castStop(true);
+  Object.assign(cast, { ip: sp.ip, name: sp.name, id: "", playing: false, heard: false });
+  both(el => { el.muted = true; });
+  cast.timer = setInterval(castPoll, 2000);
+  castShow();
+  castVolume();
+  toast(`Playing on ${sp.name}`);
+  if (!audio.paused) castSync();
+}
+function castStop(silent) {
+  if (!cast.ip) return;
+  const ip = cast.ip;
+  clearInterval(cast.timer);
+  post("/api/sonos/cmd", { ip, cmd: "pause" }).catch(() => {});
+  cast.ip = ""; cast.id = ""; cast.playing = false;
+  both(el => { el.muted = muted; });
+  castShow();
+  if (!silent) toast("Playing on this computer again");
+}
+function closeCast() { castPanel.hidden = true; castBtn.setAttribute("aria-expanded", "false"); }
+async function openCast(refresh) {
+  castPanel.innerHTML = '<div class="cap">Play on…</div><div class="cap">Looking for speakers…</div>';
+  castPanel.hidden = false; placeAbove(castPanel, castBtn); castBtn.setAttribute("aria-expanded", "true");
+  let speakers = [];
+  try { speakers = (await api("/api/sonos/speakers" + (refresh ? "?refresh=1" : ""))).speakers; }
+  catch (e) { castPanel.innerHTML = `<div class="cap">${esc(e.message)}</div>`; placeAbove(castPanel, castBtn); return; }
+  castPanel.innerHTML = '<div class="cap">Play on…</div>'
+    + (cast.ip ? '<button role="menuitem" data-ip=""><span class="t">This computer</span></button>' : "")
+    + speakers.map(s => `<button role="menuitem" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}"><span class="t">${s.ip === cast.ip ? "✓ " : ""}${esc(s.name)}</span></button>`).join("")
+    + (speakers.length ? "" : '<div class="cap">No Sonos speakers found on this network.</div>')
+    + '<hr><button role="menuitem" data-refresh="1"><span class="t">Search again</span></button>';
+  placeAbove(castPanel, castBtn);
+  castPanel.querySelector("button")?.focus();
+}
+castBtn.onclick = () => {
+  if (!castPanel.hidden) return closeCast();
+  closeQueue(); closeLyrics(); closeSleep();
+  openCast(false);
+};
+castPanel.addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.refresh) return openCast(true);
+  closeCast();
+  if (b.dataset.ip === "") { const t = audio.currentTime; castStop(false); audio.currentTime = t; }
+  else castStart({ ip: b.dataset.ip, name: b.dataset.name });
+});
+document.addEventListener("pointerdown", e => { if (!castPanel.hidden && !castPanel.contains(e.target) && !castBtn.contains(e.target)) closeCast(); });
 
 /* ---------- mini player: a second small app window, steered through the server ---------- */
 const mini = { open: false, pushedAt: 0, launched: 0, pumping: false };

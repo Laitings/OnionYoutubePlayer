@@ -15,6 +15,7 @@ import os
 import queue
 import random
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -1391,7 +1392,7 @@ def resolve(video_id: str) -> dict:
             with _id_guard:
                 if len(_id_locks) > 500:
                     _id_locks.clear()
-        stream = {"url": url, "headers": info.get("http_headers") or {}}
+        stream = {"url": url, "headers": info.get("http_headers") or {}, "ext": info.get("ext") or ""}
         print(f"looked up {video_id} in {time.time() - started:.1f}s")
         _errors.pop(video_id, None)
         if len(_stream_cache) > 300:
@@ -1420,6 +1421,10 @@ def last_error(video_id: str):
 
 @app.get("/api/audio/{video_id}")
 async def audio(video_id: str, request: Request):
+    return await stream_audio(video_id, request)
+
+
+async def stream_audio(video_id: str, request: Request):
     """Streams the audio through this server so seeking works and expired URLs are retried."""
     safe_id(video_id)
     for attempt in (1, 2):
@@ -1461,6 +1466,106 @@ async def audio(video_id: str, request: Request):
                 await cl.aclose()
 
         return StreamingResponse(body(), status_code=upstream.status_code, headers=keep)
+
+
+# ---------------------------------------------------------------- Sonos
+# The speaker fetches the audio itself, so it needs an address on the network. The main server stays on 127.0.0.1
+# (it holds your login and can edit your playlists); a second server, started only when you first use Sonos,
+# listens on the network and offers nothing but the audio, under a secret part of the URL.
+
+import sonos_cast
+
+CAST_PORT = int(os.environ.get("ONION_CAST_PORT", str(PORT + 1)))
+cast_app = FastAPI(title="Onion Player audio for Sonos", docs_url=None, redoc_url=None, openapi_url=None)
+_cast_started = threading.Lock()
+_cast_running = False
+
+
+@cast_app.get("/cast/{token}/{name}")
+async def cast_audio(token: str, name: str, request: Request):
+    if not secrets.compare_digest(token, sonos_cast.TOKEN):
+        raise HTTPException(404)
+    return await stream_audio(name.rsplit(".", 1)[0], request)
+
+
+@cast_app.head("/cast/{token}/{name}")
+async def cast_audio_head(token: str, name: str):
+    if not secrets.compare_digest(token, sonos_cast.TOKEN):
+        raise HTTPException(404)
+    video_id = safe_id(name.rsplit(".", 1)[0])
+    stream = await run_in_threadpool(resolve, video_id)
+    ctype = "audio/flac" if stream.get("ext") == "flac" else "audio/mpeg" if stream.get("ext") == "mp3" else "audio/mp4"
+    return PlainTextResponse("", headers={"Content-Type": ctype, "Accept-Ranges": "bytes"})
+
+
+def start_cast_server() -> None:
+    global _cast_running
+    with _cast_started:
+        if _cast_running:
+            return
+        import uvicorn
+        server = uvicorn.Server(uvicorn.Config(cast_app, host="0.0.0.0", port=CAST_PORT, log_level="warning"))
+        threading.Thread(target=server.run, daemon=True).start()
+        _cast_running = True
+        print(f"Sonos audio is served on port {CAST_PORT}. If Windows asks about the firewall, allow private networks.")
+
+
+def sonos_call(fn, *args):
+    try:
+        return fn(*args)
+    except ImportError:
+        raise HTTPException(500, "Sonos needs the soco package: run run.bat again to install it.")
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Sonos: {str(exc)[:200]}")
+
+
+class SonosPlay(BaseModel):
+    ip: str
+    id: str
+    title: str = ""
+    position: float = 0
+
+
+class SonosCmd(BaseModel):
+    ip: str
+    cmd: str
+    value: float | None = None
+
+
+@app.get("/api/sonos/speakers")
+async def sonos_speakers(refresh: bool = False):
+    return {"speakers": await run_in_threadpool(sonos_call, sonos_cast.discover, refresh)}
+
+
+@app.post("/api/sonos/play")
+async def sonos_play(req: SonosPlay):
+    safe_id(req.id)
+    try:
+        stream = await run_in_threadpool(resolve, req.id)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+    ext = (stream.get("ext") or "").lower()
+    if not sonos_cast.format_playable(ext):
+        raise HTTPException(422, f"Sonos cannot play this song's audio format ({ext or 'unknown'}).")
+    await run_in_threadpool(start_cast_server)
+    def go():
+        host = sonos_cast.lan_ip_for(req.ip)
+        sonos_cast.play(req.ip, f"http://{host}:{CAST_PORT}{sonos_cast.cast_path(req.id, ext)}", req.title, req.position)
+    await run_in_threadpool(sonos_call, go)
+    return {"ok": True}
+
+
+@app.post("/api/sonos/cmd")
+async def sonos_cmd(req: SonosCmd):
+    await run_in_threadpool(sonos_call, sonos_cast.command, req.ip, req.cmd, req.value)
+    return {"ok": True}
+
+
+@app.get("/api/sonos/state")
+async def sonos_state(ip: str):
+    return await run_in_threadpool(sonos_call, sonos_cast.state, ip)
 
 
 # ---------------------------------------------------------------- the mini player window

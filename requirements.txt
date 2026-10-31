@@ -3,3 +3,4 @@ uvicorn
 httpx
 ytmusicapi>=1.11
 yt-dlp[default]
+soco
