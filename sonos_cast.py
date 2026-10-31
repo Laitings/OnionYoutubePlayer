@@ -124,6 +124,12 @@ def stop_all() -> None:
 
 def command(ip: str, cmd: str, value=None) -> None:
     dev = speaker(ip)
+    if cmd in ("volume", "mute"):   # these belong to the one speaker: no need to look up the group (a slow speaker would fail that)
+        if cmd == "volume":
+            dev.volume = max(0, min(100, int(value)))
+        else:
+            dev.mute = bool(value)
+        return
     coord = dev.group.coordinator
     if cmd == "play":
         coord.play()
@@ -133,15 +139,28 @@ def command(ip: str, cmd: str, value=None) -> None:
         coord.stop()
     elif cmd == "seek":
         coord.seek(seconds_to_hms(value))
-    elif cmd == "volume":
-        dev.volume = max(0, min(100, int(value)))
-    elif cmd == "mute":
-        dev.mute = bool(value)
     else:
         raise ValueError("Unknown command")
 
 
-def state(ip: str) -> dict:
+def volumes(ips: list[str]) -> dict:
+    """Each speaker's own volume. One that does not answer is left out instead of failing the rest."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(ip):
+        for _ in range(2):
+            try:
+                return ip, _speakers[ip].volume
+            except Exception:
+                time.sleep(0.3)
+        return ip, None
+
+    known = [ip for ip in ips if ip in _speakers]
+    with ThreadPoolExecutor(max_workers=max(1, len(known))) as pool:
+        return {ip: v for ip, v in pool.map(one, known) if v is not None}
+
+
+def state(ip: str, ips: list[str] | None = None) -> dict:
     dev = speaker(ip)
     coord = dev.group.coordinator
     info = coord.get_current_track_info()
@@ -150,7 +169,6 @@ def state(ip: str) -> dict:
         "pos": hms_to_seconds(info.get("position")),
         "dur": hms_to_seconds(info.get("duration")),
         "id": track_id_from_uri(info.get("uri")),
-        "volume": dev.volume,
-        "volumes": {m.ip_address: m.volume for m in coord.group.members if m.is_visible},
+        "volumes": volumes(ips or [ip]),
         "muted": dev.mute,
     }

@@ -1824,14 +1824,15 @@ function castVolume() {   // the main slider moved
   cast.ips.forEach(s => castSetLevel(s.ip, Math.round((cast.mix[s.ip] ?? 1) * m)));
   castShowLevels();
 }
+const castStateUrl = () => `/api/sonos/state?ip=${encodeURIComponent(cast.ip)}&ips=${cast.ips.map(s => s.ip).join(",")}`;
 async function castReadLevels() {
-  try { castLevels((await api(`/api/sonos/state?ip=${encodeURIComponent(cast.ip)}`)).volumes); } catch { /* keep what we know */ }
+  try { castLevels((await api(castStateUrl())).volumes); } catch { /* keep what we know */ }
 }
 async function castPoll() {
   if (!cast.ip || cast.busy || cast.changing || !cast.id) return;
   cast.busy = true;
   try {
-    const st = await api(`/api/sonos/state?ip=${encodeURIComponent(cast.ip)}`);
+    const st = await api(castStateUrl());
     if (st.id !== cast.id && cast.playing && Date.now() - cast.since > 8000) { castStop(false); toast(`${cast.name} is playing something else, so Onion Player let go`); return; }
     if (st.state === "PLAYING" && st.id === cast.id) {
       cast.heard = true;

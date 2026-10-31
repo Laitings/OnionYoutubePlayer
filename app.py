@@ -1577,8 +1577,8 @@ async def sonos_group(req: SonosGroup):
 
 
 @app.get("/api/sonos/state")
-async def sonos_state(ip: str):
-    return await run_in_threadpool(sonos_call, sonos_cast.state, ip)
+async def sonos_state(ip: str, ips: str = ""):
+    return await run_in_threadpool(sonos_call, sonos_cast.state, ip, [x for x in ips.split(",") if x])
 
 
 # ---------------------------------------------------------------- the mini player window
