@@ -92,3 +92,16 @@ Create `config.json` next to `app.py`:
 
 - Everything runs on your computer, and the server only answers to `127.0.0.1`. `browser.json` and `cookies.auto.txt` hold your login, so don't share this folder or commit them anywhere.
 - This uses unofficial access to YouTube Music, which Google can change at any time. yt-dlp's own documentation warns that accounts used for heavy automated downloading can get flagged. The player looks up one song at a time, two songs ahead plus songs you rest the pointer on, which is about what normal listening and browsing does, but don't point scripts at it to download your library.
+
+
+### Sonos reliability (November 2026)
+
+Sonos now receives complete audio files from `cache/sonos-audio` instead of a live YouTube relay. The first play of an uncached song can take a few seconds longer. Interrupted downloads are retried before playback starts; HEAD responses report the actual file size and byte-range requests support seeking. Files are limited to 256 MB each. Cleanup targets 512 MB and removes files older than a day, while retaining recently used files for at least an hour so active playback is not disrupted.
+
+Playback and group changes are serialized. Temporary control failures keep the selected speakers connected, and a lost Play response is checked against the speaker's state before retrying. The silent browser player no longer decides when a Sonos song ends or skips it on a browser-stream error. A failed command can be retried with the player controls; it no longer automatically pauses and breaks up the group.
+
+If YouTube returns 403 for audio resolved with manual `cookies.txt`, Onion retries using `cookies.auto.txt` when present. This choice lasts for the process lifetime or until the manual cookie file changes. Imported cookie snapshots are not rewritten when resolver sessions are retired.
+
+After updating Python code, fully close Onion Player, run `Stop Onion Player.bat`, and reopen `Onion Player.vbs`. Reloading the page alone does not update the backend.
+
+Regression checks: `.venv\Scripts\python.exe -m unittest test_sonos_cast test_sonos_reliability test_playlist_safety` and `node test_sonos_ui.cjs`.

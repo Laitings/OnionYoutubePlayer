@@ -879,15 +879,12 @@ on("playing", () => {
 on("pause", () => { showPlayState(); castSync(); });
 on("seeked", () => castSeeked());
 on("ended", () => {
-  if (cast.ip) {   // the speaker decides when a song is over (castPoll); if it is slow to say so, this page's own clock does
-    const id = audio._id;
-    setTimeout(() => { if (cast.ip && audio._id === id && S.cur && S.cur.id === id) castFinished(); }, 2500);
-    return;
-  }
+  if (cast.ip) return;   // Only the speaker's state can end a cast track.
   if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); return; }
   if (S.repeat === "one") { audio.currentTime = 0; audio.play().catch(() => {}); } else next();
 });
 on("error", async () => {
+  if (cast.ip) return;   // The silent browser stream must not skip a Sonos track.
   const t = S.cur;
   if (!t) return;
   let why = "";
@@ -1767,10 +1764,25 @@ $("#mutebtn").onclick = () => setMuted(!muted);
 
 /* ---------- Sonos: the speaker plays, this page keeps its own (silent) player running as the clock ---------- */
 const castBtn = $("#castbtn"), castPanel = $("#castpanel");
+// One transport/group operation at a time; late responses belong to their
+// original session and must never disconnect a newly selected group.
+let castWork = Promise.resolve(), castWorking = 0, castEpoch = 0;
+function castEnqueue(fn) {
+  const result = castWork.then(async () => {
+    castWorking++;
+    try { return await fn(); } finally { castWorking--; }
+  });
+  castWork = result.catch(() => {});
+  return result;
+}
 const castCmd = (cmd, value) => {
-  // volume and mute belong to each speaker; everything else goes through the leader
-  const to = cmd === "volume" || cmd === "mute" ? cast.ips.map(s => s.ip) : [cast.ip];
-  return Promise.all(to.map(ip => post("/api/sonos/cmd", { ip, cmd, value }))).catch(e => { toast(e.message); });
+  const epoch = castEpoch, ip = cast.ip;
+  const run = () => {
+    if (epoch !== castEpoch || !ip) return;
+    const to = cmd === "volume" || cmd === "mute" ? cast.ips.map(s => s.ip) : [ip];
+    return Promise.all(to.map(ip => post("/api/sonos/cmd", { ip, cmd, value })));
+  };
+  return castEnqueue(run).catch(e => { if (epoch === castEpoch) toast(e.message); });
 };
 function castShow() {
   castBtn.setAttribute("aria-pressed", String(!!cast.ip));
@@ -1780,30 +1792,35 @@ let castTimer;
 function castSync() {
   if (!cast.ip) return;
   clearTimeout(castTimer);
-  castTimer = setTimeout(async () => {   // a song change pauses and plays within a moment: send only where it ended up
-    if (!cast.ip || !S.cur || S.restored) return;
-    const playing = !audio.paused, id = audio._id || S.cur.id;
+  const epoch = castEpoch;
+  castTimer = setTimeout(() => castEnqueue(async () => {
+    if (epoch !== castEpoch || !cast.ip || !S.cur || S.restored || audio.ended || audio.error) return;
+    const playing = !audio.paused, id = audio._id || S.cur.id, ip = cast.ip;
     try {
       if (id !== cast.id) {
         if (!playing) return;
-        cast.id = id; cast.playing = true; cast.heard = false; cast.since = Date.now();
-        await post("/api/sonos/play", { ip: cast.ip, id, title: `${S.cur.title} - ${S.cur.artists}`, position: audio.currentTime });
+        cast.pendingId = id;
+        await post("/api/sonos/play", { ip, id, title: `${S.cur.title} - ${S.cur.artists}`, position: audio.currentTime });
+        if (epoch !== castEpoch) return;
+        cast.pendingId = ""; cast.id = id; cast.playing = true; cast.heard = false; cast.since = Date.now();
       } else if (playing !== cast.playing) {
+        await post("/api/sonos/cmd", { ip, cmd: playing ? "play" : "pause" });
+        if (epoch !== castEpoch) return;
         cast.playing = playing;
-        await castCmd(playing ? "play" : "pause");
       }
     } catch (e) {
-      toast(e.message || "Sonos did not answer");
-      castStop(true);
+      // A timeout is not evidence that playback failed. Keep the group and
+      // allow polling / the next user action to reconcile the actual state.
+      if (epoch === castEpoch) toast((e.message || "Sonos did not answer") + ". Speakers remain selected; try the control again.");
     }
-  }, 150);
+  }), 150);
 }
 function castFinished() {
   if (!cast.ip || !cast.playing || castEnding) return;
   castEnding = true;
   cast.heard = false;
   if (S.sleepEnd) { sleepOff(); toast("Sleep timer: stopped after the song"); next(); audio.pause(); }
-  else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; castSync(); }
+  else if (S.repeat === "one") { cast.id = ""; audio.currentTime = 0; audio.play().catch(() => {}); castSync(); }
   else next();
   setTimeout(() => { castEnding = false; }, 1500);
 }
@@ -1854,12 +1871,24 @@ async function castReadLevels() {
   try { castLevels((await api(castStateUrl(true))).volumes); } catch { /* keep what we know */ }
 }
 async function castPoll() {
-  if (!cast.ip || cast.busy || cast.changing || !cast.id) return;
+  if (!cast.ip || cast.busy || cast.changing || castWorking || !(cast.pendingId || cast.id) || (cast.pendingId || cast.id) !== S.cur?.id) return;
   cast.busy = true;
   try {
     const withVol = ++cast.polls % 5 === 0 && Date.now() - cast.volAt > 5000;   // volumes only now and then: the speakers do not like being asked a lot
+    const epoch = castEpoch, id = cast.id;
     const st = await api(castStateUrl(withVol));
-    if (st.id !== cast.id && cast.playing && Date.now() - cast.since > 8000) { castStop(false); toast(`${cast.name} is playing something else, so Onion Player let go`); return; }
+    if (epoch !== castEpoch || id !== cast.id || castWorking || cast.changing) return;
+    if (cast.pendingId && st.id === cast.pendingId && st.state === "PLAYING") {
+      cast.id = st.id; cast.pendingId = ""; cast.since = Date.now(); cast.playing = true;
+    }
+    // Empty URIs can occur during transitions. Never interpret one as another
+    // app taking over, and never pause another app's stream on release.
+    if (st.id && st.id !== cast.id && cast.playing && Date.now() - cast.since > 8000) {
+      cast.mismatch = (cast.mismatch || 0) + 1;
+      if (cast.mismatch >= 3) { const name = cast.name; castStop(false, false); toast(`${name} is playing something else, so Onion Player let go`); }
+      return;
+    }
+    cast.mismatch = 0;
     if (st.state === "PLAYING" && st.id === cast.id) {
       cast.heard = true;
       if (!cast.playing) { cast.playing = true; audio.play().catch(() => {}); }   // resumed from the Sonos app
@@ -1875,7 +1904,10 @@ async function castPoll() {
   finally { cast.busy = false; }
 }
 function castNames() { return cast.ips.map(s => s.name).join(" + "); }
-async function castSetSpeakers(ips) {
+function castSetSpeakers(ips) {
+  return castEnqueue(() => castApplySpeakers(ips));
+}
+async function castApplySpeakers(ips) {
   // The first speaker leads; the others are grouped with it in Sonos, so they play in sync.
   const old = cast.ips;
   if (!ips.length) return castStop(false);
@@ -1888,23 +1920,34 @@ async function castSetSpeakers(ips) {
   const leaderChanged = old.length && old[0].ip !== ips[0].ip;
   cast.ips = ips; cast.ip = ips[0].ip; cast.name = castNames();
   castShow();
+  const epoch = castEpoch;
   cast.changing = true;   // the speakers stop and start while regrouping: do not read that as "song finished"
   try {
     await post("/api/sonos/group", { ips: ips.map(s => s.ip), removed: old.filter(o => !ips.some(s => s.ip === o.ip)).map(s => s.ip) });
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    if (epoch === castEpoch) { cast.changing = false; toast(e.message + ". Try selecting the speakers again."); }
+    return;
+  }
+  if (epoch !== castEpoch) return;
   cast.heard = false;
   cast.changing = false;
   await castReadLevels();
   if (leaderChanged) { cast.id = ""; cast.heard = false; }   // another speaker leads now: start the song there, at this position
   if (!old.length || leaderChanged) { if (!audio.paused) castSync(); }
 }
-function castStop(silent) {
+function castStop(silent, stopRemote = true) {
   if (!cast.ip) return;
   const ips = cast.ips.map(s => s.ip);
   clearInterval(cast.timer);
-  post("/api/sonos/cmd", { ip: ips[0], cmd: "pause" }).catch(() => {});
-  if (ips.length > 1) post("/api/sonos/group", { ips: [ips[0]], removed: ips.slice(1) }).catch(() => {});
-  cast.ip = ""; cast.ips = []; cast.id = ""; cast.playing = false;
+  clearTimeout(castTimer);
+  castEpoch++;
+  if (stopRemote) castEnqueue(async () => {
+    try { await post("/api/sonos/cmd", { ip: ips[0], cmd: "pause" }); } catch { /* already stopped / unavailable */ }
+    if (ips.length > 1) {
+      try { await post("/api/sonos/group", { ips: [ips[0]], removed: ips.slice(1) }); } catch { /* unavailable */ }
+    }
+  });
+  cast.pendingId = ""; cast.ip = ""; cast.ips = []; cast.id = ""; cast.playing = false; cast.changing = false;
   both(el => { el.muted = muted; });
   castShow();
   if (!silent) toast("Playing on this computer again");

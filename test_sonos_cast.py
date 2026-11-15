@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import sonos_cast as sc
 
@@ -26,8 +27,7 @@ class HelperTests(unittest.TestCase):
 
     def test_unknown_speaker_is_refused(self):
         sc._speakers.clear()
-        sc.discover = lambda force=False: []   # no network in tests
-        with self.assertRaises(LookupError):
+        with patch.object(sc, "discover", return_value=[]), self.assertRaises(LookupError):
             sc.speaker("10.0.0.99")
 
 

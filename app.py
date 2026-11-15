@@ -26,7 +26,7 @@ import httpx
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from ytmusicapi import YTMusic
@@ -1307,6 +1307,27 @@ def find_js_runtimes() -> dict:
 JS_RUNTIMES = find_js_runtimes()
 
 
+_rejected_manual_cookie_mtime = None
+
+def selected_cookie_file():
+    try:
+        stamp = MANUAL_COOKIES.stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if stamp is not None and not (stamp == _rejected_manual_cookie_mtime and AUTO_COOKIES.exists()):
+        return MANUAL_COOKIES
+    return AUTO_COOKIES if AUTO_COOKIES.exists() else None
+
+
+def invalidate_stream(video_id, status=None):
+    global _rejected_manual_cookie_mtime
+    _stream_cache.pop(video_id, None)
+    if status == 403 and selected_cookie_file() == MANUAL_COOKIES and AUTO_COOKIES.exists():
+        _rejected_manual_cookie_mtime = MANUAL_COOKIES.stat().st_mtime_ns
+        _stream_cache.clear()
+        print("YouTube rejected audio from the manual cookies; retrying with Onion's automatic cookies.")
+
+
 def ytdlp_options() -> dict:
     cfg = load_config()
     opts = {
@@ -1321,12 +1342,13 @@ def ytdlp_options() -> dict:
         # optional experiment, e.g. "player_client": ["tv", "web_safari"] in config.json
         pc = cfg["player_client"]
         opts["extractor_args"] = {"youtube": {"player_client": pc if isinstance(pc, list) else [pc]}}
-    if MANUAL_COOKIES.exists():
-        opts["cookiefile"] = str(MANUAL_COOKIES)
+    cookie_file = selected_cookie_file()
+    if cookie_file == MANUAL_COOKIES or _rejected_manual_cookie_mtime is not None and cookie_file == AUTO_COOKIES:
+        opts["cookiefile"] = str(cookie_file)
     elif cfg.get("cookies_from_browser"):
         opts["cookiesfrombrowser"] = (cfg["cookies_from_browser"],)
-    elif AUTO_COOKIES.exists():
-        opts["cookiefile"] = str(AUTO_COOKIES)
+    elif cookie_file:
+        opts["cookiefile"] = str(cookie_file)
     return opts
 
 
@@ -1348,9 +1370,13 @@ def slot_ydl(slot: dict):
             key.append(f.stat().st_mtime)
         except OSError:
             key.append(None)
+    key.append(str(selected_cookie_file()))
     if slot["ydl"] is None or key != slot["key"]:
         if slot["ydl"] is not None:
             try:
+                # Imported cookie files are user snapshots; do not overwrite
+                # them when retiring a resolver session.
+                slot["ydl"].params["cookiefile"] = None
                 slot["ydl"].close()
             except Exception:
                 pass
@@ -1448,7 +1474,7 @@ async def stream_audio(video_id: str, request: Request):
         if upstream.status_code in (403, 404, 410) and attempt == 1:
             await upstream.aclose()
             await client.aclose()
-            _stream_cache.pop(video_id, None)   # stale URL, look it up again
+            invalidate_stream(video_id, upstream.status_code)   # stale URL or rejected manual cookies
             continue
         if upstream.status_code >= 400:
             await upstream.aclose()
@@ -1474,6 +1500,13 @@ async def stream_audio(video_id: str, request: Request):
 # listens on the network and offers nothing but the audio, under a secret part of the URL.
 
 import sonos_cast
+from sonos_audio import AudioCache, MIME
+
+_sonos_audio = AudioCache(CACHE_DIR / "sonos-audio")
+
+def prepare_sonos_audio(video_id):
+    safe_id(video_id)
+    return _sonos_audio.prepare(video_id, resolve, invalidate_stream)
 
 CAST_PORT = int(os.environ.get("ONION_CAST_PORT", str(PORT + 1)))
 cast_app = FastAPI(title="Onion Player audio for Sonos", docs_url=None, redoc_url=None, openapi_url=None)
@@ -1481,21 +1514,20 @@ _cast_started = threading.Lock()
 _cast_running = False
 
 
-@cast_app.get("/cast/{token}/{name}")
+@cast_app.api_route("/cast/{token}/{name}", methods=["GET", "HEAD"])
 async def cast_audio(token: str, name: str, request: Request):
     if not secrets.compare_digest(token, sonos_cast.TOKEN):
         raise HTTPException(404)
-    return await stream_audio(name.rsplit(".", 1)[0], request)
-
-
-@cast_app.head("/cast/{token}/{name}")
-async def cast_audio_head(token: str, name: str):
-    if not secrets.compare_digest(token, sonos_cast.TOKEN):
-        raise HTTPException(404)
     video_id = safe_id(name.rsplit(".", 1)[0])
-    stream = await run_in_threadpool(resolve, video_id)
-    ctype = "audio/flac" if stream.get("ext") == "flac" else "audio/mpeg" if stream.get("ext") == "mp3" else "audio/mp4"
-    return PlainTextResponse("", headers={"Content-Type": ctype, "Accept-Ranges": "bytes"})
+    try:
+        path = await run_in_threadpool(prepare_sonos_audio, video_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+    # FileResponse provides identical metadata for GET/HEAD and proper 206/416
+    # byte-range responses. Only complete downloads are visible here.
+    return FileResponse(path, media_type=MIME[path.suffix[1:]])
 
 
 def start_cast_server() -> None:
@@ -1506,6 +1538,12 @@ def start_cast_server() -> None:
         import uvicorn
         server = uvicorn.Server(uvicorn.Config(cast_app, host="0.0.0.0", port=CAST_PORT, log_level="warning"))
         threading.Thread(target=server.run, daemon=True).start()
+        deadline = time.monotonic() + 5
+        while not server.started:
+            if server.should_exit or time.monotonic() >= deadline:
+                server.should_exit = True
+                raise RuntimeError(f"Sonos audio server could not start on port {CAST_PORT}")
+            time.sleep(0.05)
         _cast_running = True
         print(f"Sonos audio is served on port {CAST_PORT}. If Windows asks about the firewall, allow private networks.")
 
@@ -1518,6 +1556,7 @@ def sonos_call(fn, *args):
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:
+        print(f"Sonos command {getattr(fn, '__name__', 'unknown')} failed: {type(exc).__name__}: {str(exc)[:200]}")
         raise HTTPException(502, f"Sonos: {str(exc)[:200]}")
 
 
@@ -1543,12 +1582,12 @@ async def sonos_speakers(refresh: bool = False):
 async def sonos_play(req: SonosPlay):
     safe_id(req.id)
     try:
-        stream = await run_in_threadpool(resolve, req.id)
+        path = await run_in_threadpool(prepare_sonos_audio, req.id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     except Exception as exc:
         raise HTTPException(502, str(exc))
-    ext = (stream.get("ext") or "").lower()
-    if not sonos_cast.format_playable(ext):
-        raise HTTPException(422, f"Sonos cannot play this song's audio format ({ext or 'unknown'}).")
+    ext = path.suffix[1:]
     await run_in_threadpool(start_cast_server)
     def go():
         host = sonos_cast.lan_ip_for(req.ip)

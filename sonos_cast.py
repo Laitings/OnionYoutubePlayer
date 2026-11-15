@@ -5,6 +5,7 @@ audio (see start_cast_server there). Everything in this file that touches the ne
 functions; the rest is plain helpers that the tests cover.
 """
 import re
+import functools
 import secrets
 import socket
 import threading
@@ -20,6 +21,40 @@ _locks: dict[str, threading.Lock] = {}   # one request at a time per speaker: th
 _active: set[str] = set()   # speakers we started, so they can be paused when the player closes
 
 
+# Group topology and transport form a single transaction. A regroup must not
+# race with coordinator lookup, polling, or a play/pause/seek operation.
+_control_lock = threading.RLock()
+
+def serialized(fn):
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with _control_lock:
+            return fn(*args, **kwargs)
+    return run
+
+
+def _transport(dev, action, target=None):
+    """Retry a transition, never reset the URI merely because Play timed out."""
+    for attempt in range(4):
+        info = _call(dev, dev.get_current_transport_info)
+        state = info.get("current_transport_state")
+        if target and state == target:
+            return
+        if state == "TRANSITIONING":
+            time.sleep(0.5)
+            continue
+        try:
+            return _call(dev, action, 1)
+        except Exception as exc:
+            code = str(getattr(exc, "error_code", ""))
+            if code and code != "701":
+                raise
+            if attempt == 3:
+                raise
+            time.sleep(0.5)
+    raise RuntimeError("The speaker is still transitioning. Try the control again shortly.")
+
+
 def _lock(ip: str) -> threading.Lock:
     return _locks.setdefault(ip, threading.Lock())
 
@@ -32,6 +67,12 @@ def _retry(fn, tries: int = 2):
             if i == tries - 1:
                 raise
             time.sleep(0.4)
+
+
+def _call(dev, fn, tries: int = 2):
+    """One request at a time to a speaker, retried once: a Sonos that is busy answers late or drops the connection."""
+    with _lock(dev.ip_address):
+        return _retry(fn, tries)
 
 
 def hms_to_seconds(text) -> float:
@@ -69,6 +110,7 @@ def format_playable(ext: str | None) -> bool:
     return (ext or "").lower() in PLAYABLE
 
 
+@serialized
 def discover(force: bool = False) -> list[dict]:
     """Speakers on the network. Slow the first time (a few seconds), then reused for a minute."""
     global _found_at
@@ -94,22 +136,22 @@ def speaker(ip: str):
     return dev
 
 
+@serialized
 def play(ip: str, url: str, title: str = "", position: float = 0) -> None:
     dev = speaker(ip).group.coordinator
     _active.add(ip)
-    dev.play_uri(url, title=title or "Onion Player")
+    # An earlier timed-out request may already have installed this URI.
+    current = _call(dev, dev.get_current_track_info).get("uri")
+    if current != url:
+        mime = {"m4a": "audio/mp4", "mp4": "audio/mp4", "aac": "audio/aac",
+                "mp3": "audio/mpeg", "flac": "audio/flac"}.get(url.rsplit(".", 1)[-1], "audio/mp4")
+        _call(dev, lambda: dev.play_uri(url, title=title or "Onion Player", start=False, mime_type=mime), 1)
+    _transport(dev, dev.play, "PLAYING")
     if position and position > 2:
-        # the speaker needs a moment to load the stream before it accepts a seek
-        for _ in range(10):
-            time.sleep(0.5)
-            if dev.get_current_transport_info().get("current_transport_state") in ("PLAYING", "PAUSED_PLAYBACK"):
-                try:
-                    dev.seek(seconds_to_hms(position))
-                except Exception:
-                    pass
-                break
+        _transport(dev, lambda: dev.seek(seconds_to_hms(position)))
 
 
+@serialized
 def set_group(ips: list[str], removed: list[str]) -> None:
     """The first speaker leads. The others join it, so they play in sync; the removed ones leave and stop."""
     lead = speaker(ips[0])
@@ -128,7 +170,14 @@ def set_group(ips: list[str], removed: list[str]) -> None:
         except Exception:
             pass
 
+    deadline = time.monotonic() + 8
+    while any(speaker(ip).group.coordinator.ip_address != lead.ip_address for ip in ips):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Sonos group is still changing. Try selecting the speakers again.")
+        time.sleep(0.25)
 
+
+@serialized
 def stop_all() -> None:
     """Pause everything we started (the player is closing)."""
     for ip in list(_active):
@@ -139,6 +188,7 @@ def stop_all() -> None:
     _active.clear()
 
 
+@serialized
 def command(ip: str, cmd: str, value=None) -> None:
     dev = speaker(ip)
     if cmd in ("volume", "mute"):   # these belong to the one speaker: no need to look up the group (a slow speaker would fail that)
@@ -150,13 +200,14 @@ def command(ip: str, cmd: str, value=None) -> None:
         return
     coord = dev.group.coordinator
     if cmd == "play":
-        coord.play()
+        _transport(coord, coord.play, "PLAYING")
     elif cmd == "pause":
-        coord.pause()
+        if _call(coord, coord.get_current_transport_info).get("current_transport_state") not in ("STOPPED", "NO_MEDIA_PRESENT"):
+            _transport(coord, coord.pause, "PAUSED_PLAYBACK")
     elif cmd == "stop":
-        coord.stop()
+        _transport(coord, coord.stop, "STOPPED")
     elif cmd == "seek":
-        coord.seek(seconds_to_hms(value))
+        _transport(coord, lambda: coord.seek(seconds_to_hms(value)))
     else:
         raise ValueError("Unknown command")
 
@@ -177,15 +228,17 @@ def volumes(ips: list[str]) -> dict:
         return {ip: v for ip, v in pool.map(one, known) if v is not None}
 
 
+@serialized
 def state(ip: str, ips: list[str] | None = None) -> dict:
     dev = speaker(ip)
     coord = dev.group.coordinator
-    info = coord.get_current_track_info()
+    info = _call(coord, coord.get_current_track_info, 1)
+    transport = _call(coord, coord.get_current_transport_info, 1)
     return {
-        "state": coord.get_current_transport_info().get("current_transport_state", ""),
+        "state": transport.get("current_transport_state", ""),
         "pos": hms_to_seconds(info.get("position")),
         "dur": hms_to_seconds(info.get("duration")),
         "id": track_id_from_uri(info.get("uri")),
         "volumes": volumes(ips) if ips else {},
-        "muted": dev.mute,
+        "muted": _call(dev, lambda: dev.mute, 1),
     }
