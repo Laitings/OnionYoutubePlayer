@@ -939,12 +939,13 @@ function setVolume() {
   miniSync();
 }
 vol.addEventListener("input", () => { if (muted) setMuted(false); setVolume(); });
-vol.addEventListener("wheel", e => {
+[vol, $("#mutebtn")].forEach(el => el.addEventListener("wheel", e => {   // wheel over the speaker icon or the slider
   e.preventDefault();
+  if (!e.deltaY) return;
   vol.value = Math.max(0, Math.min(100, +vol.value + (e.deltaY < 0 ? 5 : -5)));
   if (muted) setMuted(false);
   setVolume();
-}, { passive: false });
+}, { passive: false }));
 
 /* media keys + keyboard */
 if ("mediaSession" in navigator) {
