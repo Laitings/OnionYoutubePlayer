@@ -37,6 +37,13 @@ $("m-play").onclick = () => send("play");
 $("m-mute").onclick = () => send("mute");
 $("m-vol").addEventListener("input", () => { volDrag = true; paint($("m-vol")); send("volume", +$("m-vol").value); });
 $("m-vol").addEventListener("change", () => { setTimeout(() => { volDrag = false; }, 600); });
+$("m-vol").addEventListener("wheel", e => {   // mouse wheel over the slider: up is louder, down is quieter
+  e.preventDefault();
+  const v = $("m-vol");
+  v.value = Math.max(0, Math.min(100, +v.value + (e.deltaY < 0 ? 5 : -5)));
+  volDrag = true; paint(v); send("volume", +v.value);
+  clearTimeout(v._t); v._t = setTimeout(() => { volDrag = false; }, 600);
+}, { passive: false });
 $("m-seek").addEventListener("input", () => { seeking = true; paint($("m-seek")); $("m-tcur").textContent = fmt($("m-seek").value / 1000 * (st.dur || 0)); });
 $("m-seek").addEventListener("change", () => { send("seek", +$("m-seek").value); setTimeout(() => { seeking = false; }, 600); });
 addEventListener("keydown", e => {
