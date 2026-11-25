@@ -58,11 +58,27 @@ Function WindowArgs()
   If InStr(text, """max"": true") > 0 Then WindowArgs = WindowArgs & " --start-maximized"
 End Function
 
+' YouTube changes often and an old yt-dlp stops finding audio, so it is updated here, at most every 12 hours.
+' Hidden, short timeouts, and a failure (for example offline) is ignored.
+Sub UpdateYtdlp(py, stamp)
+  On Error Resume Next
+  sh.Run "cmd /c """"" & py & """ -m pip install -q --disable-pip-version-check --retries 1 --timeout 8 -U ""yt-dlp[default]"" >nul 2>&1""", 0, True
+  fso.CreateTextFile(stamp, True).Write Now
+  On Error GoTo 0
+End Sub
+
 If Not Up() Then
   py = dir & "\.venv\Scripts\python.exe"
   If Not fso.FileExists(py) Then
     MsgBox "Onion Player has not been set up yet." & vbCrLf & vbCrLf & "Double-click run.bat once and let it finish starting, close it, then open this again.", 48, "Onion Player"
     WScript.Quit
+  End If
+  Dim stamp
+  stamp = dir & "\ytdlp-updated.txt"
+  If Not fso.FileExists(stamp) Then
+    UpdateYtdlp py, stamp
+  ElseIf DateDiff("h", fso.GetFile(stamp).DateLastModified, Now) >= 12 Then
+    UpdateYtdlp py, stamp
   End If
   With sh.Environment("Process")
     .Item("ONION_NO_BROWSER") = "1"
