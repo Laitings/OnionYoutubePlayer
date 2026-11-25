@@ -1136,6 +1136,19 @@ def delete_playlist(body: DeleteBody):
 
 # ---------------------------------------------------------------- backups and replacement songs
 
+@app.get("/api/log")
+def read_log(lines: int = 200):
+    """The end of onion.log, for the "Show log" button. Colour codes from yt-dlp are removed."""
+    path = BASE / "onion.log"
+    if not path.exists():
+        return {"text": "", "path": str(path)}
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 200_000))
+        raw = f.read().decode("utf-8", "replace")
+    text = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    return {"text": "\n".join(text.splitlines()[-max(1, min(lines, 1000)):]), "path": str(path)}
+
 @app.get("/api/backups")
 def list_backups():
     return {"backups": backups.listing()}

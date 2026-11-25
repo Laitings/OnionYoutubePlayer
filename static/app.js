@@ -1339,6 +1339,18 @@ function ask({ title, message = "", input = null, choices = null, ok = "OK", can
   });
 }
 
+/* ---------- the log: what went wrong when a song will not play ---------- */
+$("#logbtn").onclick = async () => {
+  let text = "";
+  try {
+    const r = await api("/api/log?lines=200");
+    text = r.text || `Nothing in ${r.path} yet. (The log is only filled when Onion Player is started with "Onion Player.vbs"; with run.bat the messages are in its console window.)`;
+  } catch (e) { text = "Could not read the log: " + e.message; }
+  ask({ title: "Log (latest lines)", cancel: "Close", ok: "Copy", body: `<pre style="max-height:60vh;max-width:min(90vw,900px);overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;user-select:text">${esc(text)}</pre>`,
+    onBody: el => { const p = el.querySelector("pre"); p.scrollTop = p.scrollHeight; } })
+    .then(v => { if (v) navigator.clipboard.writeText(text).then(() => toast("Log copied"), () => {}); });
+};
+
 /* ---------- your playlists: new, rename, delete ---------- */
 const ownedPl = id => !!id && id !== "LM" && S.playlists.some(p => p.id === id);
 async function newPlaylist(songs = [], name = "") {

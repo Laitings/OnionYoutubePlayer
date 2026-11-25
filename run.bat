@@ -21,5 +21,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem YouTube changes often and an old yt-dlp stops finding audio, so keep it current. Not fatal if offline.
+python -m pip install -q --disable-pip-version-check -U "yt-dlp[default]" >nul 2>&1
+
 python app.py
 pause
