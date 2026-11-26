@@ -157,9 +157,9 @@ function renderPlaylists() {
     const list = S.podcasts.filter(p => !f || fold(`${p.title} ${p.author}`).includes(f));
     const subs = S.podcasts.filter(p => !p.list).length;
     $("#playlists").innerHTML = list.map(p => `
-      <button class="al${p.id === S.plId ? " active" : ""}" data-id="${esc(p.id)}">
+      <button class="al${p.id === S.plId ? " active" : ""}${p.unavailable ? " gone" : ""}" data-id="${esc(p.id)}"${p.unavailable ? ' title="YouTube Music no longer has this podcast. Click to remove it from your library."' : ""}>
         ${p.list ? `<span class="alart eplist">${p.id === "SE" ? ICON_LATER : ICON_NEW}</span>` : `<img class="alart" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(p.art, 96))}">`}
-        <span class="altext"><span class="t">${esc(p.title)}</span><span class="s">${esc(p.list ? (p.id === "SE" ? "Saved to listen to later" : "From the podcasts you follow") : p.author)}</span></span>
+        <span class="altext"><span class="t">${esc(p.title)}</span><span class="s">${esc(p.list ? (p.id === "SE" ? "Saved to listen to later" : "From the podcasts you follow") : p.unavailable ? `Unavailable · ${p.author}` : p.author)}</span></span>
       </button>`).join("")
       + (subs || f ? "" : '<div class="sidecap">No podcasts yet. Find one in the Search tab, open it and press Subscribe.</div>')
       + (f && !list.length ? '<div class="sidecap">No matches.</div>' : "");
@@ -181,6 +181,7 @@ $("#playlists").addEventListener("click", e => {
   const b = e.target.closest(".pl");
   if (b) { S.scope = "one"; syncScopeButtons(); openPlaylist(b.dataset.id); return; }
   const a = e.target.closest(".al");
+  if (a && a.classList.contains("gone")) { removeGonePodcast(a.dataset.id); return; }
   if (a) { S.scope = "one"; syncScopeButtons(); S.sig = ""; openPlaylist(a.dataset.id); }
 });
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
@@ -480,6 +481,18 @@ async function toggleSubscribe() {
     paintFav();
     if (e.status === 401) onApiError(e); else toast(`Couldn't ${want ? "subscribe to" : "unsubscribe from"} the podcast: ${e.message}`);
   } finally { favBusy = false; }
+}
+
+async function removeGonePodcast(id) {
+  const p = (S.podcasts || []).find(x => x.id === id);
+  if (!p || !await ask({ title: `“${p.title}” is unavailable`, message: "YouTube Music no longer has this podcast, so it has no episodes to play. Remove it from your library?", ok: "Remove", danger: true })) return;
+  try {
+    await api("/api/podcastsub", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, subscribe: false }) });
+    toast("Removed from your podcasts");
+    setPodcasts((await api("/api/podcasts")).podcasts);
+  } catch (e) {
+    if (e.status === 401) onApiError(e); else toast(`Couldn't remove the podcast: ${e.message}`);
+  }
 }
 
 /* Episodes remember where you stopped, so a long episode continues there, and finished ones are marked as played.
@@ -925,6 +938,7 @@ function markPlaying() {
   if (S.cur) document.querySelectorAll(`#tracks .row[data-id="${CSS.escape(S.cur.id)}"]`).forEach(r => r.classList.add("playing"));
 }
 function showNowPlaying(t) {
+  applySpeed();
   $("#nptitle").textContent = t.title;
   $("#npartist").innerHTML = artistsHtml(t);
   const img = $("#npart");
@@ -1721,6 +1735,47 @@ sleepPanel.addEventListener("click", e => {
 document.addEventListener("pointerdown", e => { if (!sleepPanel.hidden && !sleepPanel.contains(e.target) && !sleepBtn.contains(e.target)) closeSleep(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !sleepPanel.hidden) { closeSleep(); sleepBtn.focus(); } });
 
+/* ---------- playback speed: for podcast episodes only (music always plays at normal speed), remembered in this browser profile ---------- */
+const SPEEDS = [0.75, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const speedBtn = $("#speedbtn"), speedPanel = $("#speedpanel");
+let epSpeed = SPEEDS.includes(store.get("epSpeed", 1)) ? store.get("epSpeed", 1) : 1;
+function speedText(r) { return `${r}×`; }
+function applySpeed() {   // also runs before this section has been read (restoring the last song at start), so it reads nothing from it then
+  if (!speedReady) return;
+  const ep = isEpisode(S.cur);
+  const r = ep && !cast.ip ? epSpeed : 1;   // Sonos plays the stream at its own speed
+  both(a => { a.preservesPitch = true; a.defaultPlaybackRate = r; if (a.playbackRate !== r) a.playbackRate = r; });
+  speedBtn.hidden = !ep;
+  speedBtn.textContent = speedText(epSpeed);
+  speedBtn.setAttribute("aria-pressed", String(epSpeed !== 1));
+  speedBtn.title = cast.ip ? "Playback speed: only on this computer, not on Sonos" : `Playback speed for podcast episodes: ${speedText(epSpeed)}`;
+}
+var speedReady = true;   // var: hoisted, so applySpeed can check it before this line has run
+applySpeed();
+on("playing", applySpeed);   // the spare player may have been loaded at another speed
+function closeSpeed() { speedPanel.hidden = true; speedBtn.setAttribute("aria-expanded", "false"); }
+speedBtn.onclick = () => {
+  if (!speedPanel.hidden) return closeSpeed();
+  closeQueue(); closeLyrics(); closeSleep();
+  speedPanel.innerHTML = '<div class="cap">Podcast playback speed</div>'
+    + SPEEDS.map(r => `<button role="menuitemradio" aria-checked="${r === epSpeed}" class="${r === epSpeed ? "on" : ""}" data-r="${r}"><span class="t">${r === 1 ? "Normal" : speedText(r)}</span>${r === epSpeed ? ICON_CHECK : ""}</button>`).join("")
+    + (cast.ip ? '<div class="cap">Sonos always plays at normal speed.</div>' : "");
+  speedPanel.hidden = false;
+  placeAbove(speedPanel, speedBtn);
+  speedBtn.setAttribute("aria-expanded", "true");
+  (speedPanel.querySelector("button.on") || speedPanel.querySelector("button"))?.focus();
+};
+speedPanel.addEventListener("click", e => {
+  const b = e.target.closest("button[data-r]");
+  if (!b) return;
+  closeSpeed();
+  epSpeed = +b.dataset.r;
+  store.set("epSpeed", epSpeed);
+  applySpeed();
+});
+document.addEventListener("pointerdown", e => { if (!speedPanel.hidden && !speedPanel.contains(e.target) && !speedBtn.contains(e.target)) closeSpeed(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !speedPanel.hidden) { closeSpeed(); speedBtn.focus(); } });
+
 /* ---------- lyrics ---------- */
 const lyricsPanel = $("#lyricspanel"), lyricsBody = $("#lyricsbody"), lyricsBtn = $("#lyricsbtn");
 let lyricsTimed = null, lyricsAt = -1, lyricsFor = null;
@@ -1921,6 +1976,7 @@ const castCmd = (cmd, value) => {
   return castEnqueue(run).catch(e => { if (epoch === castEpoch) toast(e.message); });
 };
 function castShow() {
+  applySpeed();
   castBtn.setAttribute("aria-pressed", String(!!cast.ip));
   castBtn.title = cast.ip ? `Playing on ${cast.name} (click to change)` : "Play on Sonos";
 }

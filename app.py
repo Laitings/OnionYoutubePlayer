@@ -413,17 +413,40 @@ def fetch_podcast(pid: str) -> dict:
     }
 
 
+def read_episodes_playlist(yt, pid: str) -> list:
+    """The episodes of New episodes, each with its podcast. ytmusicapi's get_episodes_playlist leaves out the podcast,
+    which YouTube Music sends as the row's second title."""
+    from ytmusicapi.navigation import MUSIC_SHELF, SECTION_LIST_ITEM, TWO_COLUMN_RENDERER, nav
+    from ytmusicapi.parsers.podcasts import parse_episode
+    response = yt._send_request("browse", {"browseId": "VL" + pid})
+    shelf = nav(response, [*TWO_COLUMN_RENDERER, "secondaryContents", *SECTION_LIST_ITEM, *MUSIC_SHELF])
+    out = []
+    for c in shelf.get("contents") or []:
+        row = c.get("musicMultiRowListItemRenderer")
+        if not row:
+            continue
+        e = parse_episode(row)
+        show = ((row.get("secondTitle") or {}).get("runs") or [{}])[0]
+        if show.get("text"):
+            e["podcast"] = {"name": show["text"], "id": _find_key(show.get("navigationEndpoint") or {}, "browseId")}
+        out.append(e)
+    return out
+
+
 def fetch_episode_list(pid: str) -> dict:
     """New episodes (from the podcasts in your library) or Episodes for later."""
     yt = get_yt()
     try:
+        if pid != "RDPN":   # Episodes for later comes as an ordinary playlist shelf
+            raise LookupError("not an episodes shelf")
         with _yt_lock:
-            data = yt.get_episodes_playlist(pid)
-        tracks = [simplify_episode(e) for e in data.get("episodes") or []]
+            data = read_episodes_playlist(yt, pid)
+        tracks = [simplify_episode(e) for e in data]
     except HTTPException:
         raise
     except Exception as exc:   # the page layout ytmusicapi expects is only documented for New episodes: read it as a playlist instead
-        print(f"episode list {pid} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+        if pid == "RDPN":
+            print(f"episode list {pid} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
         with _yt_lock:
             data = yt.get_playlist(pid, limit=None)
         tracks = [{**simplify(t), "type": EPISODE_TYPE} for t in data.get("tracks") or []]
@@ -813,6 +836,54 @@ def podcast_entry(pid: str, data: dict) -> dict:
     return {"id": pid, "title": data.get("title") or "", "author": pod.get("author") or "", "art": pod.get("cover")}
 
 
+def _find_key(o, key: str):
+    """The first value stored under key anywhere in o (depth first)."""
+    if isinstance(o, dict):
+        if key in o:
+            return o[key]
+        o = list(o.values())
+    if isinstance(o, list):
+        for v in o:
+            found = _find_key(v, key)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_library_podcast(data: dict) -> dict:
+    """One podcast in your library. ytmusicapi's own parser crashes on a podcast YouTube no longer has
+    ("This podcast is unavailable": its title has no link), which broke the whole list. This one keeps it, marked."""
+    runs = (data.get("title") or {}).get("runs") or [{}]
+    nav_ = data.get("navigationEndpoint") or {}
+    bid = (_find_key(runs[0].get("navigationEndpoint") or {}, "browseId")
+           or (nav_.get("browseEndpoint") or {}).get("browseId") or "")
+    target = _find_key(data.get("menu") or {}, "target") or _find_key(nav_, "target") or {}
+    plid = target.get("playlistId") if isinstance(target, dict) else None
+    if not bid and plid:
+        bid = "MPSP" + plid
+    sub = ((data.get("subtitle") or {}).get("runs") or [{}])[0]
+    thumbs = _find_key(data.get("thumbnailRenderer") or {}, "thumbnails") or []
+    return {"browseId": bid, "title": runs[0].get("text") or "", "author": sub.get("text") or "",
+            "thumbnails": thumbs, "unavailable": "addToToastAction" in nav_}
+
+
+def get_library_podcasts_raw(yt) -> list:
+    from ytmusicapi.continuations import get_continuations
+    from ytmusicapi.navigation import GRID
+    from ytmusicapi.parsers.browsing import parse_content_list
+    from ytmusicapi.parsers.library import get_library_contents
+    from ytmusicapi.mixins._utils import prepare_order_params
+    body = {"browseId": "FEmusic_library_non_music_audio_list", "params": prepare_order_params("recently_added")}
+    results = get_library_contents(yt._send_request("browse", body), GRID)
+    if results is None:
+        return []
+    parse = lambda contents: parse_content_list(contents, parse_library_podcast)
+    items = parse(results["items"])
+    if "continuations" in results:
+        items += get_continuations(results, "gridContinuation", None, lambda extra: yt._send_request("browse", body, extra), parse)
+    return items
+
+
 @app.get("/api/podcasts")
 def library_podcasts(refresh: int = 0):
     """The podcasts in your YouTube Music library, after New episodes and Episodes for later."""
@@ -822,20 +893,22 @@ def library_podcasts(refresh: int = 0):
             return {**cached, "cached": True}
     try:
         with _yt_lock:
-            items = get_yt().get_library_podcasts(limit=None, order="recently_added")
+            items = get_library_podcasts_raw(get_yt())
     except HTTPException:
         raise
     except Exception as exc:
+        print(f"library podcasts failed: {exc.__class__.__name__}: {str(exc)[:300]}")
         raise api_error(exc, account_level=True)
     out = [{"id": pid, "title": title, "author": "", "art": None, "list": True} for pid, title in EPISODE_LISTS.items()]
+    seen = set()
     for it in items:
         bid = it.get("browseId") or ""
-        if not bid.startswith("MPSP"):   # New episodes (VLRDPN) is listed here too: it is already first
+        if not bid.startswith("MPSP") or bid in seen:   # skips "Add podcast" and New episodes (VLRDPN), which is already first
             continue
+        seen.add(bid)
         thumbs = it.get("thumbnails") or []
-        ch = it.get("channel") if isinstance(it.get("channel"), dict) else {}
-        out.append({"id": bid, "title": it.get("title") or "", "author": ch.get("name") or "",
-                    "art": thumbs[-1]["url"] if thumbs else None})
+        out.append({"id": bid, "title": it.get("title") or "", "author": it.get("author") or "",
+                    "art": thumbs[-1]["url"] if thumbs else None, **({"unavailable": True} if it.get("unavailable") else {})})
     data = {"podcasts": out, "fetched": int(time.time())}
     write_cache("_podcasts", data)
     return {**data, "cached": False}

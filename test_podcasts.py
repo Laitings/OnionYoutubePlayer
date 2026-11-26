@@ -1,4 +1,4 @@
-"""Podcast support, with a fake YouTube Music client and temporary files, never a real library."""
+﻿"""Podcast support, with a fake YouTube Music client and temporary files, never a real library."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,19 +25,34 @@ class FakeYT:
         return {"title": "Onion Talk", "author": {"name": "Onion Media", "id": "UCx"}, "description": "A show",
                 "saved": False, "thumbnails": [{"url": "https://img/cover"}], "episodes": [episode(1), episode(2, duration="")]}
 
-    def get_episodes_playlist(self, pid):
-        if pid == "SE":
-            raise KeyError("contents")
-        return {"episodes": [episode(3)]}
+    def _send_request(self, endpoint, body, additional=""):
+        """Raw YouTube Music pages, shaped like the real ones (only the parts the parsers read)."""
+        def runs(text, bid=None):
+            return {"runs": [{"text": text, **({"navigationEndpoint": {"browseEndpoint": {"browseId": bid}}} if bid else {})}]}
+        if body["browseId"] == "VLRDPN":   # New episodes: the podcast is the row's second title
+            row = {"title": runs("Episode 3", "MPEDep3"), "secondTitle": runs("Onion Talk", "MPSPPLonion"),
+                   "subtitle": runs("2d ago"), "onTap": {"watchEndpoint": {"videoId": "ep3"}}}
+            shelf = {"musicShelfRenderer": {"contents": [{"musicMultiRowListItemRenderer": row}]}}
+            return {"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {"sectionListRenderer": {"contents": [shelf]}}}}}
+
+        def item(title, sub, bid, plid, gone=False):
+            return {"musicTwoRowItemRenderer": {
+                "title": runs(title, None if gone else bid), "subtitle": runs(sub),
+                "navigationEndpoint": {"addToToastAction": {}} if gone else {"browseEndpoint": {"browseId": bid}},
+                "thumbnailRenderer": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [{"url": "https://img/cover"}]}}},
+                "menu": {"menuRenderer": {"items": [{"toggleMenuServiceItemRenderer": {
+                    "defaultServiceEndpoint": {"likeEndpoint": {"target": {"playlistId": plid}}}}}]}}}}
+        grid = {"gridRenderer": {"items": [
+            {"musicTwoRowItemRenderer": {"title": runs("Add podcast"), "navigationEndpoint": {"openPopupAction": {}}}},
+            item("New Episodes", "Auto playlist", "VLRDPN", "RDPN"),
+            item("Onion Talk", "Onion Media", "MPSPPLonion", "PLonion"),
+            item("Gone Show", "Someone", None, "PLgone", gone=True),   # "This podcast is unavailable": its title has no link
+        ]}}
+        return {"contents": {"singleColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [grid]}}}}]}}}
 
     def get_playlist(self, pid, limit=None):
         return {"tracks": [{"videoId": "ep4", "title": "Saved one", "artists": [{"name": "Onion Talk", "id": None}],
                             "thumbnails": [], "duration_seconds": 600}]}
-
-    def get_library_podcasts(self, limit=25, order=None):
-        return [{"title": "New Episodes", "browseId": "VLRDPN", "podcastId": "RDPN"},
-                {"title": "Onion Talk", "channel": {"name": "Onion Media", "id": "UCx"}, "browseId": "MPSPPLonion",
-                 "thumbnails": [{"url": "https://img/cover"}]}]
 
     def rate_playlist(self, pid, rating):
         self.rated.append((pid, rating))
@@ -82,7 +97,9 @@ class PodcastTests(unittest.TestCase):
         self.assertEqual(app.read_cache("MPSPPLonion")["count"], 2)
 
     def test_episode_lists(self):
-        self.assertEqual([t["id"] for t in app.playlist("RDPN")["tracks"]], ["ep3"])
+        new = app.playlist("RDPN")["tracks"]
+        self.assertEqual([t["id"] for t in new], ["ep3"])
+        self.assertEqual(new[0]["artistList"], [{"name": "Onion Talk", "id": "MPSPPLonion"}])   # each episode names its podcast
         saved = app.playlist("SE")   # falls back to reading it as a playlist
         self.assertEqual(saved["title"], "Episodes for later")
         self.assertEqual((saved["tracks"][0]["id"], saved["tracks"][0]["type"]), ("ep4", EP))
@@ -95,7 +112,11 @@ class PodcastTests(unittest.TestCase):
 
     def test_library_and_subscribe(self):
         lib = app.library_podcasts(refresh=1)["podcasts"]
-        self.assertEqual([p["id"] for p in lib], ["RDPN", "SE", "MPSPPLonion"])
+        self.assertEqual([p["id"] for p in lib], ["RDPN", "SE", "MPSPPLonion", "MPSPPLgone"])
+        self.assertEqual((lib[2]["author"], lib[2]["art"], lib[2].get("unavailable")), ("Onion Media", "https://img/cover", None))
+        self.assertTrue(lib[3]["unavailable"])   # a podcast YouTube no longer has is listed (so it can be removed), not a crash
+        app.subscribe_podcast(app.SubBody(id="MPSPPLgone", subscribe=False))
+        self.assertEqual(self.yt.rated[-1], ("PLgone", "INDIFFERENT"))
         app.playlist("MPSPPLonion")
         app.subscribe_podcast(app.SubBody(id="MPSPPLonion", subscribe=False))
         self.assertEqual(self.yt.rated[-1], ("PLonion", "INDIFFERENT"))
