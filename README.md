@@ -35,6 +35,7 @@ The first time, the page asks you to connect YouTube Music. Follow the four step
 - **Albums:** click an album name in the list (or choose *Go to album* in a song's three-dot menu) to open that album, with its artist, year and all its songs, and the song you came from flashed. Albums are saved like playlists. Songs saved before the player remembered album ids make one quick lookup the first time.
 - **Favorite albums:** on an album page, *Favorite* adds the album to your YouTube Music library (it shows under Library, Albums in the app), and the **Albums** tab at the top of the sidebar lists them, newest first. Click one to open it. Albums you already have in your library show up there too, and a change made in the YouTube Music app appears here when you come back to this window.
 - **Search YouTube Music:** the **Search** tab in the sidebar searches all of YouTube Music, not just your library. Type and press Enter: artists and albums (incl. EPs and singles) show as cards, songs as a normal list you can play, like and add to playlists. Click an artist or album card to open it, and use *Back to results* in the Search tab to return. Your last 12 searches are kept in the tab.
+- **Podcasts:** the **Podcasts** tab in the sidebar lists *New episodes* (from the podcasts you follow), *Episodes for later* and the podcasts in your YouTube Music library. Search finds podcasts too: they show as cards under the songs, artists and albums. A podcast opens like an album, with its cover, description and episodes, newest first (up to the latest 500). *Subscribe* adds it to your YouTube Music library, so it also shows in the app. Click an episode to play it; the podcast name opens the podcast. Episodes remember where you stopped, so a long episode continues there the next time you play it, and the list shows how much is left or that you've played it. *Mark as played* / *Mark as not played* are in the episode's three-dot menu. Where you stopped is kept in this browser profile, like the queue, and is not synced to YouTube Music. New episodes doesn't say which podcast each episode is from, because YouTube Music doesn't give that for that list.
 - Search, sort and the queue all run in the page, on the list you're looking at. Click a song and the queue is whatever is on screen at that moment, filtered and sorted.
 
 ## Library tools and recovery
@@ -56,7 +57,7 @@ The first time, the page asks you to connect YouTube Music. Follow the four step
 The regression tests use temporary directories and a fake YouTube client. They do not edit a real account:
 
 ```powershell
-.venv\Scripts\python -m unittest test_playlist_safety -v
+.venv\Scripts\python -m unittest test_playlist_safety test_podcasts -v
 node test_player_tools.cjs
 ```
 

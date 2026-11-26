@@ -66,6 +66,7 @@ const S = {
   view: [], queue: [], order: [], pos: -1, cur: null, fails: 0,
   liked: null,    // Set of liked song ids, once Liked songs has been read
   albums: null, favAlbums: null,   // the favorite albums list (your YouTube Music library albums), and its ids
+  podcasts: null, subs: null,      // the podcasts in your YouTube Music library, and their ids
   tab: store.get("tab", "playlists"), results: null, sugg: [], suggFor: null,   // results: the last YouTube Music search
   focus: null,    // {id, at}: a song to scroll to and flash the next time the list is drawn
   shuffle: store.get("shuffle", false), repeat: store.get("repeat", "off"),
@@ -132,11 +133,11 @@ function renderPlaylists() {
   updateHeadActions();
   const f = fold($("#plfilter").value.trim());
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)));
-  $("#plfilter").placeholder = S.tab === "search" ? "Search all of YouTube Music" : S.tab === "albums" ? "Filter albums" : "Filter playlists";
+  $("#plfilter").placeholder = S.tab === "search" ? "Search all of YouTube Music" : S.tab === "albums" ? "Filter albums" : S.tab === "podcasts" ? "Filter podcasts" : "Filter playlists";
   if (S.tab === "search") {
     const recent = store.get("recent", []);
     const back = S.results && S.plId !== "search" ? `<button class="sr back" data-q="${esc(S.results.q)}" data-back="1">← Back to results for “${esc(S.results.q)}”</button>` : "";
-    $("#playlists").innerHTML = '<div class="sidecap">Songs, albums and artists from all of YouTube Music. Type and press Enter.</div>' + back
+    $("#playlists").innerHTML = '<div class="sidecap">Songs, albums, artists and podcasts from all of YouTube Music. Type and press Enter.</div>' + back
       + (recent.length ? '<div class="sidecap">Recent searches</div>' + recent.map(r => `<button class="sr" data-q="${esc(r)}">${esc(r)}</button>`).join("") : "");
     return;
   }
@@ -149,6 +150,19 @@ function renderPlaylists() {
         <span class="altext"><span class="t">${esc(a.title)}</span><span class="s">${esc([a.artists, a.year].filter(Boolean).join(" · "))}</span></span>
       </button>`).join("")
       : `<div class="sidecap">${S.albums.length ? "No matches." : "No favorite albums yet. Open an album and press Favorite."}</div>`;
+    return;
+  }
+  if (S.tab === "podcasts") {
+    if (!S.podcasts) { $("#playlists").innerHTML = '<div class="sidecap">Loading your podcasts…</div>'; return; }
+    const list = S.podcasts.filter(p => !f || fold(`${p.title} ${p.author}`).includes(f));
+    const subs = S.podcasts.filter(p => !p.list).length;
+    $("#playlists").innerHTML = list.map(p => `
+      <button class="al${p.id === S.plId ? " active" : ""}" data-id="${esc(p.id)}">
+        ${p.list ? `<span class="alart eplist">${p.id === "SE" ? ICON_LATER : ICON_NEW}</span>` : `<img class="alart" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(p.art, 96))}">`}
+        <span class="altext"><span class="t">${esc(p.title)}</span><span class="s">${esc(p.list ? (p.id === "SE" ? "Saved to listen to later" : "From the podcasts you follow") : p.author)}</span></span>
+      </button>`).join("")
+      + (subs || f ? "" : '<div class="sidecap">No podcasts yet. Find one in the Search tab, open it and press Subscribe.</div>')
+      + (f && !list.length ? '<div class="sidecap">No matches.</div>' : "");
     return;
   }
   $("#playlists").innerHTML = recentEntry(f) + S.playlists.filter(p => !f || fold(p.title).includes(f)).map(p => {
@@ -185,6 +199,7 @@ async function loadPlaylists() {
     if (!S.plId) openPlaylist(S.playlists.some(p => p.id === store.get("last")) ? store.get("last") : "LM");
     if (S.plId !== "LM") loadLiked();   // opening Liked songs reads them anyway
     loadAlbums();
+    loadPodcasts();
     if (first.cached) {
       const fresh = await api("/api/playlists?refresh=1");
       S.playlists = fresh.playlists;
@@ -238,7 +253,7 @@ addEventListener("popstate", e => {
   } finally { navRestoring = false; }
 });
 
-const isPage = id => /^(MPRE|UC|MPLA)/.test(id);   // album and artist pages, which have a header and are not in the playlist list
+const isPage = id => /^(MPRE|UC|MPLA|MPSP)/.test(id);   // album, artist and podcast pages, which have a header and are not in the playlist list
 async function openPlaylist(id, full = false) {
   if (id.startsWith("smart:")) return openSmart(id.slice(6));
   if (id === "recent") return showRecent();
@@ -252,7 +267,8 @@ async function openPlaylist(id, full = false) {
   renderPlaylists();
   $("#side").classList.remove("open");
   const meta = S.playlists.find(p => p.id === id);
-  $("#plname").textContent = meta ? meta.title : /^MPRE/.test(id) ? "Album" : /^(UC|MPLA)/.test(id) ? "Artist" : "Playlist";
+  const pod = (S.podcasts || []).find(p => p.id === id);
+  $("#plname").textContent = meta ? meta.title : pod ? pod.title : /^MPRE/.test(id) ? "Album" : /^(UC|MPLA)/.test(id) ? "Artist" : /^MPSP/.test(id) ? "Podcast" : "Playlist";
   if (S.scope === "one") $("#plmeta").textContent = "Loading…";
   const seq = ++S.seq, url = `/api/playlist/${encodeURIComponent(id)}`;
   try {
@@ -304,29 +320,34 @@ $("#shelves").addEventListener("click", e => {
   if (c) openPage(c.dataset.id);
 });
 function showHero(data) {
-  const al = data && data.album, ar = data && data.artist;
-  hero.hidden = !(al || ar);
+  const al = data && data.album, ar = data && data.artist, po = data && data.podcast;
+  hero.hidden = !(al || ar || po);
   hero.classList.toggle("artist", !!ar);
-  $(".head").classList.toggle("album", !!(al || ar));
-  $("#herofav").hidden = !al;
+  $(".head").classList.toggle("album", !!(al || ar || po));
+  $("#herofav").hidden = !(al || po);
+  $("#heroshuf").hidden = !!po;   // episodes play newest first, one after the other
   $("#rowshead").hidden = !ar;
   $("#rowshead").textContent = "Popular songs";
   showShelves(ar);
-  if (!al && !ar) return;
-  const n = data.tracks.length, img = $("#herocover"), src = al || ar;
-  $("#herokind").textContent = ar ? "Artist" : (al.type || "Album");
+  if (!al && !ar && !po) return;
+  const n = data.tracks.length, img = $("#herocover"), src = al || ar || po;
+  $("#herokind").textContent = ar ? "Artist" : po ? "Podcast" : (al.type || "Album");
   $("#heroexp").hidden = !(al && al.explicit);
   $("#herotitle").textContent = data.title;
   if (ar) {
     $("#heroby").textContent = ar.stats || "";
     $("#herostats").textContent = ar.views || "";
+  } else if (po) {
+    $("#heroby").textContent = po.author || "";
+    const left = data.tracks.filter(t => !(epPos[t.id] && epPos[t.id].done)).length;
+    $("#herostats").textContent = [`${n} ${n === 1 ? "episode" : "episodes"}`, left < n ? `${left} not played` : ""].filter(Boolean).join(" · ");
   } else {
     const list = (al.artistList || []).filter(a => a.id);
     $("#heroby").innerHTML = list.length ? list.map(a => `<span class="artlink" data-id="${esc(a.id)}">${esc(a.name)}</span>`).join(", ") : esc(al.artists || "");
     $("#herostats").textContent = [al.year, `${n} ${n === 1 ? "song" : "songs"}`, al.seconds ? playTime(al.seconds) : ""].filter(Boolean).join(" · ");
   }
   img.onerror = () => { img.onerror = null; img.src = "/logo.svg"; };
-  const pic = ar ? ar.image : al.cover;
+  const pic = ar ? ar.image : (al || po).cover;
   img.src = pic ? artUrl(pic, 544) : "/logo.svg";
   const d = $("#herodesc");
   d.hidden = !src.description;
@@ -384,11 +405,12 @@ function showSearch() {
   pushNav("search");
   showHero(null);
   $("#shelves").innerHTML = shelfSec("Artists", r.artists, true, () => "Artist")
-    + shelfSec("Albums", r.albums, false, x => [x.artists, x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "));
+    + shelfSec("Albums", r.albums, false, x => [x.artists, x.year, x.type && x.type !== "Album" ? x.type : ""].filter(Boolean).join(" · "))
+    + shelfSec("Podcasts", r.podcasts || [], false, () => "Podcast");
   $("#rowshead").textContent = "Songs";
   $("#rowshead").hidden = !r.songs.length;
   $("#plname").textContent = `Search: ${r.q}`;
-  $("#plmeta").textContent = `${r.songs.length} songs, ${r.albums.length} albums, ${r.artists.length} artists`;
+  $("#plmeta").textContent = `${r.songs.length} songs, ${r.albums.length} albums, ${r.artists.length} artists, ${(r.podcasts || []).length} podcasts`;
   S.sig = "search:" + r.q;
   S.tracks = r.songs.map((t, i) => prep(t, i + 1, "", 0, "search"));
   S.q = ""; $("#q").value = "";
@@ -414,13 +436,98 @@ async function loadAlbums(quiet) {
 function paintFav() {
   const b = $("#herofav");
   if (hero.hidden) return;
+  if (isPodcast(S.plId)) {
+    const on = !!S.subs && S.subs.has(S.plId);
+    b.setAttribute("aria-pressed", String(on));
+    b.querySelector("span").textContent = on ? "Subscribed" : "Subscribe";
+    b.title = on ? "Remove from your podcasts" : "Add to your podcasts (also adds it to your YouTube Music library, so new episodes show in New episodes)";
+    return;
+  }
   const on = !!S.favAlbums && S.favAlbums.has(S.plId);
   b.setAttribute("aria-pressed", String(on));
   b.querySelector("span").textContent = on ? "Favorited" : "Favorite";
   b.title = on ? "Remove from your favorite albums" : "Add to your favorite albums (also adds it to your YouTube Music library)";
 }
+
+/* ---------- podcasts: your subscriptions (= podcasts in your YouTube Music library), New episodes and Episodes for later ---------- */
+const isPodcast = id => /^MPSP/.test(id || "");
+function setPodcasts(list) {
+  S.podcasts = list;
+  S.subs = new Set(list.filter(p => !p.list).map(p => p.id));
+  renderPlaylists();
+  paintFav();
+}
+async function loadPodcasts() {
+  try {
+    const first = await api("/api/podcasts");
+    setPodcasts(first.podcasts);
+    if (first.cached) setPodcasts((await api("/api/podcasts?refresh=1")).podcasts);
+  } catch { /* the list stays as it was */ }
+}
+async function toggleSubscribe() {
+  if (!S.subs) { loadPodcasts(); return toast("Still reading your podcasts. Try again in a moment."); }
+  if (favBusy) return;
+  favBusy = true;
+  const id = S.plId, want = !S.subs.has(id);
+  if (want) S.subs.add(id); else S.subs.delete(id);
+  paintFav();
+  try {
+    await api("/api/podcastsub", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, subscribe: want }) });
+    toast(want ? "Added to your podcasts" : "Removed from your podcasts");
+    setPodcasts((await api("/api/podcasts")).podcasts);   // the server's saved list already has the change
+  } catch (e) {
+    if (want) S.subs.delete(id); else S.subs.add(id);
+    paintFav();
+    if (e.status === 401) onApiError(e); else toast(`Couldn't ${want ? "subscribe to" : "unsubscribe from"} the podcast: ${e.message}`);
+  } finally { favBusy = false; }
+}
+
+/* Episodes remember where you stopped, so a long episode continues there, and finished ones are marked as played.
+   Kept in this browser profile, like the queue: { videoId: { at, d, done, ts } }. */
+const EP_TYPE = "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+const isEpisode = t => !!t && t.type === EP_TYPE;
+const epPos = store.get("episodes", {});
+let epSavedAt = 0;
+function saveEpisodes() {
+  const ids = Object.keys(epPos);
+  if (ids.length > 400) ids.sort((a, b) => epPos[a].ts - epPos[b].ts).slice(0, ids.length - 400).forEach(k => delete epPos[k]);
+  store.set("episodes", epPos);
+}
+function noteEpisode(force) {
+  const t = S.cur;
+  if (!isEpisode(t) || !t.id || S.restored || !audio.src) return;
+  if (!force && Date.now() - epSavedAt < 5000) return;
+  const d = dur(), at = Math.floor(audio.currentTime) || 0;
+  if (!d || at < 3) return;   // not started (or only just): keep what is saved
+  epSavedAt = Date.now();
+  epPos[t.id] = { at, d: Math.round(d), done: d > 60 ? at >= d - 30 : at >= d - 2, ts: Date.now() };
+  saveEpisodes();
+  paintEpisode(t.id);
+}
+function markEpisode(t, done) {
+  if (done) epPos[t.id] = { at: 0, d: t.duration || 0, done: true, ts: Date.now() };
+  else delete epPos[t.id];
+  saveEpisodes();
+  paintEpisode(t.id);
+}
+function epInfo(t) {
+  const e = epPos[t.id];
+  const state = !e ? "" : e.done ? "Played" : e.d ? `${playTime(Math.max(60, e.d - e.at))} left` : "Started";
+  return [t.date, state].filter(Boolean).join(" · ");
+}
+function paintEpisode(id) {
+  document.querySelectorAll(`#rows .row[data-id="${CSS.escape(id)}"]`).forEach(r => {
+    const t = S.view[+r.dataset.i];
+    if (!t) return;
+    const x = r.querySelector(".epinfo");
+    if (x) x.textContent = epInfo(t);
+    r.classList.toggle("played", !!(epPos[id] && epPos[id].done));
+  });
+}
+
 let favBusy = false;
 $("#herofav").onclick = async () => {
+  if (isPodcast(S.plId)) return toggleSubscribe();
   if (!S.favAlbums) { loadAlbums(); return toast("Still reading your albums. Try again in a moment."); }
   if (favBusy || hero.hidden) return;
   favBusy = true;
@@ -447,12 +554,13 @@ function applyPlaylist(data) {
   const sig = data.id + ":" + ids.join();
   $("#plname").textContent = data.title;
   const bad = data.tracks.filter(t => !t.ok).length;
-  $("#plmeta").textContent = `${data.byline ? data.byline + " · " : ""}${data.tracks.length} songs${bad ? `, ${bad} unavailable` : ""}, checked ${when(data.checked || data.fetched)}`;
+  const unit = data.podcast || data.tracks.some(isEpisode) ? "episodes" : "songs";
+  $("#plmeta").textContent = `${data.byline ? data.byline + " · " : ""}${data.tracks.length} ${unit}${bad ? `, ${bad} unavailable` : ""}, checked ${when(data.checked || data.fetched)}`;
   if (sig === S.sig) return;
   if (S.sig.startsWith(data.id + ":") && S.tracks.length) {   // same playlist, new content: say what changed
     const before = new Set(S.tracks.map(t => t.id)), after = new Set(ids);
     const added = ids.filter(x => !before.has(x)).length, removed = [...before].filter(x => !after.has(x)).length;
-    if (added || removed) toast(`Playlist updated: ${added} added, ${removed} removed`);
+    if (added || removed) toast(`${unit === "episodes" ? "Episodes" : "Playlist"} updated: ${added} added, ${removed} removed`);
   }
   S.sig = sig;
   S.tracks = data.tracks.map((t, i) => prep(t, i + 1, "", 0, data.id));
@@ -505,14 +613,15 @@ function render() {
   if (S.sel.size) { const here = new Set(src.map(selKey)); for (const k of S.sel) if (!here.has(k)) S.sel.delete(k); }
   const shown = list.slice(0, LIMIT);
   const over = list.length > shown.length ? `, showing the first ${shown.length}` : "";
-  $("#count").textContent = terms.length ? `${list.length} of ${src.length} songs${over}` : `${src.length} songs${over}`;
+  const unit = src.length && src.every(isEpisode) ? "episodes" : "songs";
+  $("#count").textContent = terms.length ? `${list.length} of ${src.length} ${unit}${over}` : `${src.length} ${unit}${over}`;
   const all = S.scope === "all", lk = S.liked;
   $("#rows").innerHTML = shown.length ? shown.map((t, i) => `
-    <div class="row${t.ok ? "" : " off"}${S.sel.has(selKey(t)) ? " selected" : ""}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
+    <div class="row${t.ok ? "" : " off"}${S.sel.has(selKey(t)) ? " selected" : ""}${isEpisode(t) && epPos[t.id] && epPos[t.id].done ? " played" : ""}" tabindex="0" data-i="${i}" data-id="${esc(t.id || "")}">
       <span class="idx"><span class="num">${t.n}</span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><input type="checkbox" class="pick" tabindex="-1" aria-label="Select"${S.sel.has(selKey(t)) ? " checked" : ""}></span>
       <img class="art" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'" src="${esc(artUrl(t.art, 96))}">
       <span class="main"><span class="title">${hl(t.title, terms)}</span><span class="sub">${artistsHtml(t, terms)}</span></span>
-      <span class="alb">${all ? hl(t.pl, terms) : t.album ? `<span class="albtxt" title="Go to this album">${hl(t.album, terms)}</span>` : ""}</span>
+      <span class="alb">${all ? hl(t.pl, terms) : isEpisode(t) ? `<span class="epinfo">${esc(epInfo(t))}</span>` : t.album ? `<span class="albtxt" title="Go to this album">${hl(t.album, terms)}</span>` : ""}</span>
       <button class="star${lk && lk.has(t.id) ? " on" : ""}" tabindex="-1" aria-label="Like" title="${lk && lk.has(t.id) ? "Remove from liked songs" : "Add to liked songs"}"><svg viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
       <button class="rowmenu" tabindex="-1" aria-label="More" aria-haspopup="menu" aria-expanded="false" title="More"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg></button>
       <span class="dur">${t.ok ? (t.duration ? fmt(t.duration) : "") : "Unavailable"}</span>
@@ -688,11 +797,13 @@ function restoreNow() {
 }
 addEventListener("pagehide", () => {
   saveNow(true);
+  noteEpisode(true);
   // closing or reloading the page loses the link to the speakers, so do not leave them playing on their own
   if (cast.ip) navigator.sendBeacon("/api/sonos/cmd", new Blob([JSON.stringify({ ip: cast.ip, cmd: "pause" })], { type: "application/json" }));
 });
 function playPos(pos) {
   if (pos < 0 || pos >= S.order.length) return;
+  noteEpisode(true);   // where the episode that was playing got to
   S.pos = pos; S.restored = false;
   const t = S.cur = S.queue[S.order[pos]];
   if (spare._id === t.id && spare.getAttribute("src") && !spare._failed) {
@@ -704,9 +815,13 @@ function playPos(pos) {
     audio.src = streamUrl(t);
     audio._id = t.id; audio._failed = false;
   }
-  const resume = S.resume && S.resume.id === t.id ? S.resume.at : 0;
+  let resume = S.resume && S.resume.id === t.id ? S.resume.at : 0;
   S.resume = null;
-  if (resume > 2 && !(t.duration && resume > t.duration - 5)) audio.addEventListener("loadedmetadata", () => { audio.currentTime = resume; }, { once: true });
+  if (!resume && isEpisode(t) && epPos[t.id] && !epPos[t.id].done) resume = epPos[t.id].at;   // continue the episode where you stopped
+  if (resume > 2 && !(t.duration && resume > t.duration - 5)) {
+    if (audio.readyState >= 1) audio.currentTime = resume;   // the spare player already has it loaded
+    else { const a = audio; a.addEventListener("loadedmetadata", () => { a.currentTime = resume; }, { once: true }); }
+  }
   audio.play().catch(() => { /* a newer song replaced this one */ });
   showPlayState();
   showNowPlaying(t);
@@ -850,6 +965,7 @@ on("timeupdate", () => {
   $("#tcur").textContent = fmt(audio.currentTime);
   $("#tdur").textContent = fmt(d);
   saveNow();
+  noteEpisode();
   syncLyrics();
   miniTime();
   if ("mediaSession" in navigator && d && isFinite(audio.duration)) {
@@ -876,7 +992,7 @@ on("playing", () => {
   const n = songAt(1);
   if (n && spare._id !== n.id) preloadNext(300);
 });
-on("pause", () => { showPlayState(); castSync(); });
+on("pause", () => { showPlayState(); castSync(); noteEpisode(true); });
 on("seeked", () => castSeeked());
 on("ended", () => {
   if (cast.ip) return;   // Only the speaker's state can end a cast track.
@@ -1063,6 +1179,9 @@ const ICON_NEXT = '<svg viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0
 const ICON_QUEUE = '<svg viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0 8h7v2H3zm13 0v-3h-2v3h-3v2h3v3h2v-3h3v-2z"/></svg>';
 const ICON_PERSON ='<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
 const ICON_BACK = '<svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+const ICON_LATER = '<svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>';
+const ICON_NEW = '<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>';
 const ICON_REMOVE = '<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
 function closeMenu() {
   menu.hidden = true;
@@ -1096,8 +1215,10 @@ function mainMenu(track = S.cur, anchor = dots) {
     <button role="menuitem" data-act="queue"${t && t.ok ? "" : " disabled"}>${ICON_QUEUE}<span class="t">Add to queue</span></button>
     <button role="menuitem" data-act="like" class="${on ? "on" : ""}"${off}>${ICON_STAR}<span class="t">${on ? "Remove from liked songs" : "Add to liked songs"}</span></button>
     <button role="menuitem" data-act="addpl"${off}>${ICON_ADD}<span class="t">Add to playlist</span></button>
-    <button role="menuitem" data-act="artist"${off}>${ICON_PERSON}<span class="t">Go to artist</span></button>
-    <button role="menuitem" data-act="album"${t && t.id && t.album ? "" : " disabled"}>${ICON_ALBUM}<span class="t">Go to album</span></button>
+    ${isEpisode(t) ? `<button role="menuitem" data-act="podcast"${off}>${ICON_PERSON}<span class="t">Go to podcast</span></button>
+    <button role="menuitem" data-act="played"${off}>${ICON_CHECK}<span class="t">${epPos[t.id] && epPos[t.id].done ? "Mark as not played" : "Mark as played"}</span></button>`
+    : `<button role="menuitem" data-act="artist"${off}>${ICON_PERSON}<span class="t">Go to artist</span></button>`}
+    ${isEpisode(t) ? "" : `<button role="menuitem" data-act="album"${t && t.id && t.album ? "" : " disabled"}>${ICON_ALBUM}<span class="t">Go to album</span></button>`}
     <button role="menuitem" data-act="find"${off}>${ICON_LIST}<span class="t">Find in playlists</span></button>
     ${t ? "" : '<div class="cap">Play a song to use these.</div>'}`);
   menu.querySelector("button:not(:disabled)")?.focus();
@@ -1260,6 +1381,8 @@ menu.addEventListener("click", e => {
   else if (act === "queue") { closeMenu(); addToQueue(t); }
   else if (act === "album") goToAlbum(t);
   else if (act === "artist") artistMenu();
+  else if (act === "podcast") goToArtist(t);
+  else if (act === "played") { closeMenu(); markEpisode(t, !(epPos[t.id] && epPos[t.id].done)); }
   else if (act === "goartist") openPage(b.dataset.id);
   else if (act === "addpl") addMenu();
   else if (act === "addto") addToPlaylist(t, b.dataset.pl);
