@@ -1697,7 +1697,21 @@ function placeAbove(panel, btn) {
 
 /* ---------- settings menu (the gear at the bottom of the sidebar) ---------- */
 const settingsBtn = $("#settingsbtn"), settingsPanel = $("#settingspanel");
-function closeSettings() { settingsPanel.hidden = true; settingsBtn.setAttribute("aria-expanded", "false"); }
+function closeSettings() { settingsPanel.hidden = true; $("#settip").hidden = true; settingsBtn.setAttribute("aria-expanded", "false"); }
+/* the circled i: hovering it (or focusing / tapping it) explains each entry, beside the menu */
+const setInfo = $("#setinfo"), setTip = $("#settip");
+function showSetTip() {
+  setTip.hidden = false;
+  const m = settingsPanel.getBoundingClientRect(), w = setTip.offsetWidth, h = setTip.offsetHeight;
+  const beside = m.right + 8 + w <= innerWidth - 8;   // no room to the right (narrow window): cover the menu below the i
+  setTip.style.left = (beside ? m.right + 8 : Math.max(8, m.right - w)) + "px";
+  setTip.style.top = Math.max(8, Math.min(beside ? m.top : setInfo.getBoundingClientRect().bottom + 6, innerHeight - h - 8)) + "px";
+}
+const hideSetTip = () => { setTip.hidden = true; };
+setInfo.addEventListener("pointerenter", showSetTip);
+setInfo.addEventListener("pointerleave", hideSetTip);
+setInfo.addEventListener("focus", showSetTip);
+setInfo.addEventListener("blur", hideSetTip);
 settingsBtn.onclick = () => {
   if (!settingsPanel.hidden) return closeSettings();
   settingsPanel.hidden = false;
