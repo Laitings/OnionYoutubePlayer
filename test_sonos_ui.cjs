@@ -11,7 +11,7 @@ function setup(post) {
     S: {cur:{id:'song',title:'Song',artists:'Artist'},restored:false},
     audio: {paused:false,ended:false,error:null,_id:'song',currentTime:12,play:async()=>{},pause(){}},
     castBtn: {setAttribute(){}}, castPanel: {querySelectorAll:()=>[]},
-    muted:false, both:()=>{}, scrubbing:false, dur:()=>200,
+    muted:false, both:()=>{}, scrubbing:false, dur:()=>200, applySpeed:()=>{},
     toast:m=>notices.push(m),
     post:async(url,body)=>{calls.push({url,body}); return post(url,body);},
     api:async()=>({id:'song',state:'PLAYING',pos:12,dur:200}),
