@@ -595,11 +595,11 @@ $("#syncall").onclick = async () => {
   b.disabled = true;
   let failed = 0;
   for (let i = 0; i < list.length; i++) {
-    b.textContent = `Syncing ${i + 1} of ${list.length}`;
+    b.textContent = $("#bgstatus").textContent = `Syncing ${i + 1} of ${list.length}`;   // the menu is closed, so the sidebar shows progress
     try { await api(`/api/playlist/${encodeURIComponent(list[i].id)}?refresh=1`); } catch (e) { failed++; if (e.status === 401) { onApiError(e); break; } }
   }
   S.allTracks = null; S.sig = "";
-  b.disabled = false; b.textContent = "Sync all playlists";
+  b.disabled = false; b.textContent = "Sync all playlists"; $("#bgstatus").textContent = "";
   toast(failed ? `Synced with ${failed} failed` : "All playlists synced");
   if (S.scope === "all") await showScope(); else if (S.plId === "search") showSearch(); else openPlaylist(S.plId);
 };
@@ -1694,6 +1694,20 @@ function placeAbove(panel, btn) {
   panel.style.bottom = (innerHeight - r.top + 8) + "px";
   panel.style.left = Math.max(8, Math.min(r.left, innerWidth - panel.offsetWidth - 8)) + "px";
 }
+
+/* ---------- settings menu (the gear at the bottom of the sidebar) ---------- */
+const settingsBtn = $("#settingsbtn"), settingsPanel = $("#settingspanel");
+function closeSettings() { settingsPanel.hidden = true; settingsBtn.setAttribute("aria-expanded", "false"); }
+settingsBtn.onclick = () => {
+  if (!settingsPanel.hidden) return closeSettings();
+  settingsPanel.hidden = false;
+  placeAbove(settingsPanel, settingsBtn);
+  settingsBtn.setAttribute("aria-expanded", "true");
+  settingsPanel.querySelector("button:not(:disabled)")?.focus();
+};
+settingsPanel.addEventListener("click", e => { if (e.target.closest("button")) closeSettings(); });   // each button has its own handler
+document.addEventListener("pointerdown", e => { if (!settingsPanel.hidden && !settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) closeSettings(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !settingsPanel.hidden) { closeSettings(); settingsBtn.focus(); } });
 
 /* ---------- sleep timer ---------- */
 const sleepBtn = $("#sleepbtn"), sleepPanel = $("#sleeppanel");

@@ -53,6 +53,11 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 .sr.back { color: var(--accent); }
 .pl .n { font-family: var(--head); color: var(--faint); font-variant-numeric: tabular-nums; }
 .side-foot { padding: 12px 14px 14px; display: grid; gap: 8px; border-top: 1px solid var(--line); }
+.foot-row { display: flex; gap: 8px; }
+.foot-row #newpl { flex: 1; }
+.foot-row #settingsbtn { display: grid; place-items: center; padding: 7px 10px; }
+.foot-row svg { width: 20px; height: 20px; fill: currentColor; }
+.side-foot .bgstatus:empty { min-height: 0; margin-bottom: -8px; }
 .ghost { background: none; border: 1px solid var(--line); border-radius: 9px; padding: 7px 12px; color: var(--dim); }
 .ghost:hover:not(:disabled) { border-color: var(--faint); color: var(--text); }
 .ghost:disabled { opacity: .6; cursor: default; }
